@@ -2,6 +2,11 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+cache = true
+optimizer = true
+optimizer_runs = 10000
+fs_permissions = [{ access = "read-write", path = "./" }]
+
 
 remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
 
