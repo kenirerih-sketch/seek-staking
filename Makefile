@@ -58,3 +58,6 @@ deploy-staking:
 # Local test for staking deploy
 test-deploy-staking:
 	@forge test --match-contract DeploySinglePoolStaking -vvvv
+
+test-staking:
+	@forge test --match-contract SinglePoolStakingTest -vvvv
