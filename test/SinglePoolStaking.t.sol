@@ -53,7 +53,8 @@ contract SinglePoolStakingTest is Test {
         staking = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner); // 1 token/sec
 
         // Distribute some to the user for staking
-        stakeToken.transfer(user, 1_000 ether);
+        bool success = stakeToken.transfer(user, 1_000 ether);
+        if (!success) revert("Transfer failed");
 
         // Prefund reward bucket via fundRewards (IMPORTANT: do not transfer directly)
         stakeToken.approve(address(staking), type(uint256).max);
@@ -160,7 +161,9 @@ contract SinglePoolStakingTest is Test {
 
         // give user2 tokens and stake in this fresh instance
         address user2 = address(0x2);
-        stakeToken.transfer(user2, 100 ether);
+        bool success = stakeToken.transfer(user2, 100 ether);
+        if (!success) revert("Transfer failed");
+
         vm.startPrank(user2);
         stakeToken.approve(address(s), type(uint256).max);
         s.stake(100 ether);
@@ -333,7 +336,9 @@ contract SinglePoolStakingTest is Test {
         uint256 ownerBefore = other.balanceOf(address(this));
 
         uint256 amount = 1_234 ether;
-        other.transfer(address(staking), amount);
+        bool success = other.transfer(address(staking), amount);
+        if (!success) revert("Transfer failed");
+
         assertEq(other.balanceOf(address(staking)), amount, "funded amount mismatch");
 
         vm.expectEmit(true, true, false, true);
@@ -387,7 +392,8 @@ contract SinglePoolStakingTest is Test {
     /// @dev Validates sender and recipient are tracked correctly and that pre-accrued rewards persist.
     function testStakeFor_Success_EventAndAccounting() public {
         address sponsor = address(0xABCD);
-        stakeToken.transfer(sponsor, 500 ether);
+        bool success = stakeToken.transfer(sponsor, 500 ether);
+        if (!success) revert("Transfer failed");
 
         // target stakes first and accrues some rewards
         _stake(user, 100 ether);
@@ -592,7 +598,8 @@ contract SinglePoolStakingTest is Test {
     ///      each receives 5 tokens out of total 10 accrued.
     function testAccrual_ProportionalDistribution() public {
         address user2 = address(0x2);
-        stakeToken.transfer(user2, 1_000 ether);
+        bool success = stakeToken.transfer(user2, 1_000 ether);
+        if (!success) revert("Transfer failed");
 
         _stake(user, 100 ether);
         _stake(user2, 100 ether);
@@ -637,7 +644,9 @@ contract SinglePoolStakingTest is Test {
         s.fundRewards(5 ether); // Very small reserve
 
         address user3 = address(0x3333);
-        stakeToken.transfer(user3, 100 ether);
+        bool success = stakeToken.transfer(user3, 100 ether);
+        if (!success) revert("Transfer failed");
+
         vm.startPrank(user3);
         stakeToken.approve(address(s), type(uint256).max);
         s.stake(100 ether);
