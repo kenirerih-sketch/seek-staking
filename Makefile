@@ -82,6 +82,9 @@ test-deploy-staking:
 test-staking-unit:
 	@forge test --match-contract SinglePoolStaking_Unit -vvvv
 
+test-staking-fuzz:
+	@forge test --match-contract SinglePoolStaking_Fuzz -vvvv
+
 
 test-staking-scenarios:
 	@forge test --match-contract SinglePoolStaking_Scenarios -vvvv
