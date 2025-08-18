@@ -109,14 +109,14 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
 
         // Window 1 (rate1 = 1e18)
         uint256 newly1 = uint256(t1) * 1e18;
-        uint256 deltaRPT1 = (newly1 * 1e18) / total; // floor
+        uint256 deltaRpt1 = (newly1 * 1e18) / total; // floor
 
         // Window 2 (rate2 = r2)
         uint256 newly2 = uint256(t2) * uint256(r2);
-        uint256 deltaRPT2 = (newly2 * 1e18) / total; // floor
+        uint256 deltaRpt2 = (newly2 * 1e18) / total; // floor
 
         // IMPORTANT: user is updated ONCE at the end → single floor on the SUM
-        uint256 expected = (total * (deltaRPT1 + deltaRPT2)) / 1e18;
+        uint256 expected = (total * (deltaRpt1 + deltaRpt2)) / 1e18;
 
         assertEq(paid, expected, "snapshot + new-rate accrual mismatch (single staker)");
 

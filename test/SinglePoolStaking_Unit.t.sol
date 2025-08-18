@@ -2,12 +2,12 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {SinglePoolStakingBase} from "./BaseSinglePoolStaking.t.sol";
 import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
 import {ERC20Token} from "./mocks/ERC20Token.sol";
+import {WeirdRewardToken} from "./mocks/WeirdRewardToken.sol";
 
 /// @title SinglePoolStaking — Unit Test Suite
 /// @notice Focused, deterministic unit tests for the SinglePoolStaking contract.
@@ -423,6 +423,23 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         staking.emergencyWithdraw();
     }
 
+    /// @notice After emergencyWithdraw, user does not accrue retroactively; new accrual starts only after restake.
+    function testEmergencyWithdraw_NoBackAccrualThenRestake() public {
+        _stake(alice, 200 ether);
+        vm.warp(block.timestamp + 5);
+        vm.prank(alice);
+        staking.emergencyWithdraw();
+
+        // Warp more — with no stake, earned must remain 0
+        vm.warp(block.timestamp + 10);
+        assertEq(staking.earned(alice), 0, "no accrual post-emergency without stake");
+
+        // Restake and accrue again
+        _stake(alice, 100 ether);
+        vm.warp(block.timestamp + 3);
+        assertEq(staking.earned(alice), 3 ether, "new accrual after restake only");
+    }
+
     /// @notice Equal stakers share rewards proportionally.
     /// @dev 10s @1 token/sec with two equal stakers → 5 tokens each (view path).
     function testAccrual_ProportionalDistribution() public {
@@ -482,32 +499,32 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         vm.warp(block.timestamp + 10);
         assertEq(staking.earned(alice), 10 ether, "basic earned mismatch");
     }
-}
 
-/// @title WeirdRewardToken (Test Mock)
-/// @notice ERC20 mock that can pretend to transfer (return `true`) without updating balances.
-/// @dev Used to exercise the `received == 0` defensive branch in `fundRewards`.
-contract WeirdRewardToken is ERC20 {
-    /// @notice When true, `transferFrom` returns success without moving balances.
-    bool public noMove;
+    /// @notice Ownable2Step: only pending owner can accept; post-accept, only new owner can admin.
+    function testOwnership_TwoStepFlow() public {
+        address newOwner = makeAddr("newOwner");
 
-    /// @param name_ Token name (mock).
-    /// @param symbol_ Token symbol (mock).
-    /// @param supply Initial mint to deployer (for convenience).
-    constructor(string memory name_, string memory symbol_, uint256 supply) ERC20(name_, symbol_) {
-        _mint(msg.sender, supply);
-    }
+        // transferOwnership sets pending but does not change owner
+        staking.transferOwnership(newOwner);
+        // Old owner still can fund
+        staking.fundRewards(1 ether);
 
-    /// @notice Enable/disable “no balance change” mode.
-    /// @param v True to pretend transfers; false for normal ERC20 behavior.
-    function setNoMove(bool v) external {
-        noMove = v;
-    }
+        // Non-pending cannot accept
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        staking.acceptOwnership();
 
-    /// @inheritdoc ERC20
-    /// @dev When `noMove == true`, returns `true` without changing balances to simulate non-standard tokens.
-    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
-        if (noMove) return true; // pretend success, don't move balances
-        return super.transferFrom(from, to, amount);
+        // Pending accepts
+        vm.prank(newOwner);
+        staking.acceptOwnership();
+
+        // Old owner loses perms
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        staking.setRewardRate(2e18);
+
+        // New owner has perms
+        vm.prank(newOwner);
+        staking.setRewardRate(3e18);
+        assertEq(staking.rewardRate(), 3e18);
     }
 }
