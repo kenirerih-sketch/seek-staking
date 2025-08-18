@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: slither slither-json slither-sarif slither-html slither-summary slither-install slither-docker remappings
+.PHONY: slither slither-json slither-sarif slither-html slither-summary slither-install slither-docker remappings all test clean deploy fund help install snapshot format anvil
 
 help:
 	@echo ""
@@ -79,8 +79,12 @@ deploy-staking:
 test-deploy-staking:
 	@forge test --match-contract DeploySinglePoolStaking -vvvv
 
-test-staking:
-	@forge test --match-contract SinglePoolStakingTest -vvvv
+test-staking-unit:
+	@forge test --match-contract SinglePoolStaking_Unit -vvvv
+
+
+test-staking-scenarios:
+	@forge test --match-contract SinglePoolStaking_Scenarios -vvvv
 
 # -------- Slither (Static Analysis) --------
 # Target contract (limit analysis scope for speed/signal)
