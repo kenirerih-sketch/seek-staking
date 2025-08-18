@@ -85,9 +85,11 @@ test-staking-unit:
 test-staking-fuzz:
 	@forge test --match-contract SinglePoolStaking_Fuzz -vvvv
 
-
 test-staking-scenarios:
 	@forge test --match-contract SinglePoolStaking_Scenarios -vvvv
+
+test-staking-invariants:
+	@forge test --match-contract SinglePoolStaking_Invariants -vvvv
 
 # -------- Slither (Static Analysis) --------
 # Target contract (limit analysis scope for speed/signal)
