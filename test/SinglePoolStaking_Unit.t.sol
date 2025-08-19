@@ -78,7 +78,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @dev Uses a token that returns `true` on `transferFrom` but does not change balances, making `received == 0`.
     function testFundRewards_RevertWhenReceivedZero() public {
         WeirdRewardToken weird = new WeirdRewardToken("WRD", "WRD", 1_000_000 ether);
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this));
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 1);
 
         weird.approve(address(s), type(uint256).max);
         weird.setNoMove(true);
@@ -87,19 +87,28 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         s.fundRewards(123 ether);
     }
 
-    /// @notice Snapshot across rate change; assert by claiming (mutative), not via pure `earned()` view.
+    /// @notice Snapshot across rate change using propose/execute; assert by claiming (mutative), not via pure view.
     /// @dev Window1: [0,10) @1e18 → 10 tokens; Window2: [10,20) @2e18 → 20 tokens. Total paid on claim = 30 tokens.
-    function testSetRewardRate_Snapshot_ClaimBased() public {
+    ///      Uses 1s delay set in BaseSinglePoolStaking to minimize test warp noise.
+    function testProposeRewardRate_Snapshot_ClaimBased() public {
         _stake(alice, 100 ether);
 
-        // t in [0,10): old rate 1e18 => 10 tokens
-        vm.warp(block.timestamp + 10);
+        // t in [0,10): old rate 1e18 => 10 tokens (includes +1 delay for propose to be executed)
+        vm.warp(block.timestamp + 9);
 
+        // Propose new rate (owner-only)
+        uint64 executeAfter = uint64(block.timestamp + 1); // delay = 1 (from Base)
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(2e18, executeAfter);
+        staking.proposeRewardRate(2e18);
+
+        // Wait for delay then execute
+        vm.warp(block.timestamp + 1);
         vm.expectEmit(false, false, false, true);
         emit RewardRateUpdated(1e18, 2e18);
-        staking.setRewardRate(2e18);
+        staking.executeRewardRateChange();
 
-        // t in [10,20): new rate 2e18 => 20 tokens; expected total 30
+        // t in [10+1, 20+1): effectively another 10s @2e18
         vm.warp(block.timestamp + 10);
 
         uint256 before = stakeToken.balanceOf(alice);
@@ -194,14 +203,14 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @dev Covers `InvalidToken` branch.
     function testConstructor_RevertOnZeroStakeToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this));
+        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 1);
     }
 
     /// @notice Constructor: zero-address guard for reward token.
     /// @dev Covers `InvalidToken` branch.
     function testConstructor_RevertOnZeroRewardToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this));
+        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1);
     }
 
     /// @notice `balanceOf` reflects user stake balance.
@@ -237,7 +246,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice `rewardPerToken` is capped by `rewardReserves` in the view path.
     /// @dev Uses a fresh instance with tiny reserves; asserts RPT == (reserves * 1e18) / totalStaked.
     function testView_rewardPerToken_CapsByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this));
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(10 ether);
 
@@ -278,32 +287,61 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(beforeRes - afterRes, 10 ether, "reserves not consumed on update");
     }
 
-    /// @notice Only the owner can change `rewardRate`.
-    /// @dev Covers `OwnableUnauthorizedAccount` branch.
-    function testSetRewardRate_OnlyOwner() public {
+    /// @notice Only the owner can propose a new reward rate; execution is permissionless after delay (safer UX).
+    /// @dev Covers owner-gate on propose; shows that a non-owner can execute after delay if desired.
+    function testProposeRewardRate_OnlyOwner() public {
+        // Non-owner proposing reverts
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
-        staking.setRewardRate(2e18);
+        staking.proposeRewardRate(2e18);
+
+        // Owner proposes
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(2e18, executeAfter);
+        staking.proposeRewardRate(2e18);
+
+        // Anyone can execute after delay (permissionless execution pattern)
+        vm.warp(block.timestamp + 1);
+        vm.prank(alice);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, 2e18);
+        staking.executeRewardRateChange();
+
+        assertEq(staking.rewardRate(), 2e18, "rewardRate not updated");
     }
 
-    /// @notice Two `setRewardRate` calls in the same block keep `lastUpdateTime` consistent.
-    /// @dev No warp between calls to exercise same-block early-return path.
-    function testSetRewardRate_IdempotentSameBlockUpdateTime() public {
+    /// @notice Propose does not affect `lastUpdateTime`; execute updates it once (no drift within same block).
+    /// @dev With a 1s delay: propose (no change), warp+execute (updates to now), then propose again (no change).
+    function testProposeRewardRate_IdempotentSameBlockUpdateTime() public {
+        // Propose new rate: should NOT touch lastUpdateTime
         uint64 before = staking.lastUpdateTime();
-        staking.setRewardRate(2e18);
-        uint64 mid = staking.lastUpdateTime();
-        staking.setRewardRate(3e18);
-        uint64 afterUpdate = staking.lastUpdateTime();
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(2e18, executeAfter);
+        staking.proposeRewardRate(2e18);
+        uint64 mid1 = staking.lastUpdateTime();
+        assertEq(mid1, before, "propose should not change lastUpdateTime");
 
-        assertEq(mid, afterUpdate, "lastUpdateTime drifted within same block");
-        assertLe(before, mid, "lastUpdateTime not monotonic");
+        // Execute after delay: should set lastUpdateTime to current block
+        vm.warp(block.timestamp + 1);
+        staking.executeRewardRateChange();
+        uint64 mid2 = staking.lastUpdateTime();
+        assertLe(before, mid2, "lastUpdateTime should advance on execute");
+
+        // Propose again in same block: no change to lastUpdateTime
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(3e18, uint64(block.timestamp + 1));
+        staking.proposeRewardRate(3e18);
+        uint64 afterUpdate = staking.lastUpdateTime();
+        assertEq(afterUpdate, mid2, "propose (same block) should not change lastUpdateTime");
     }
 
     /// @notice Cannot rescue the reward token when stake != reward (distinct invalid branch).
     /// @dev Deploys a fresh instance with a different reward token and asserts `InvalidToken`.
     function testRescueTokens_InvalidForRewardToken_WhenDifferentTokens() public {
         ERC20Token reward2 = new ERC20Token("R", "R", 1_000_000 ether, address(this));
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this));
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 1);
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
         s.rescueTokens(reward2, address(this), 1 ether);
     }
@@ -450,25 +488,29 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.earned(bob), 5 ether, "bob share mismatch");
     }
 
-    /// @notice With no stakers, calling an admin function does not consume reserves.
-    /// @dev Triggers `_updateGlobal()` with `totalStaked == 0` via `setRewardRate`.
+    /// @notice With no stakers, executing a rate change (which snaps global) does not consume reserves.
+    /// @dev Triggers `_updateGlobal()` with `totalStaked == 0` via execute.
     function testAccrual_NoStakersDoesNotConsumeReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this));
+        // fresh pool
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(1_000 ether);
 
         uint256 before = s.rewardReserves();
-        vm.warp(block.timestamp + 100);
-        s.setRewardRate(1e18); // triggers _updateGlobal with totalStaked == 0
-        uint256 afterRes = s.rewardReserves();
 
+        // propose & execute a no-op rate change (same rate)
+        s.proposeRewardRate(1e18);
+        vm.warp(block.timestamp + 1);
+        s.executeRewardRateChange();
+
+        uint256 afterRes = s.rewardReserves();
         assertEq(afterRes, before, "reserves consumed without stakers");
     }
 
     /// @notice State-path reserve cap: accrual is limited by reserves and consumed on update.
     /// @dev View: `earned()` is capped; State: `getReward()` consumes at most the cap (reserves).
     function testAccrual_StatePathCappedByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this));
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(5 ether);
 
@@ -500,7 +542,8 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.earned(alice), 10 ether, "basic earned mismatch");
     }
 
-    /// @notice Ownable2Step: only pending owner can accept; post-accept, only new owner can admin.
+    /// @notice Ownable2Step: only pending owner can accept; after accept, only new owner can propose.
+    /// @dev Also checks permissionless execution after delay.
     function testOwnership_TwoStepFlow() public {
         address newOwner = makeAddr("newOwner");
 
@@ -518,13 +561,140 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         vm.prank(newOwner);
         staking.acceptOwnership();
 
-        // Old owner loses perms
+        // Old owner loses perms to propose
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        staking.setRewardRate(2e18);
+        staking.proposeRewardRate(2e18);
 
-        // New owner has perms
+        // New owner can propose
         vm.prank(newOwner);
-        staking.setRewardRate(3e18);
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(3e18, executeAfter);
+        staking.proposeRewardRate(3e18);
+
+        // Anyone executes after delay
+        vm.warp(block.timestamp + 1);
+        vm.prank(alice);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, 3e18);
+        staking.executeRewardRateChange();
+
         assertEq(staking.rewardRate(), 3e18);
+    }
+
+    /// @notice Proposing a rate above the configured max should revert with `RewardRateTooHigh`.
+    function testProposeRewardRate_RevertAboveMax() public {
+        uint256 max = staking.MAX_REWARD_RATE();
+        uint256 requested = max + 1;
+
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooHigh.selector, requested, max));
+        staking.proposeRewardRate(requested);
+    }
+
+    /// @notice Proposing exactly MAX_REWARD_RATE should succeed and execute after delay.
+    function testProposeRewardRate_AtMax_SucceedsAndEmits() public {
+        uint256 max = staking.MAX_REWARD_RATE();
+
+        // Propose = max
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(max, executeAfter);
+        staking.proposeRewardRate(max);
+
+        // Execute after delay
+        vm.warp(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, max);
+        staking.executeRewardRateChange();
+
+        assertEq(staking.rewardRate(), max, "rewardRate not set to max");
+    }
+
+    /// @notice Executing without any pending proposal should revert.
+    /// @dev Covers the `pending == 0` branch in `executeRewardRateChange`.
+    function testExecuteRewardRateChange_Revert_NoPending() public {
+        // Ensure there is no pending change
+        // (Fresh state after Base setUp has no pending)
+        vm.expectRevert(SinglePoolStaking.NoPendingRate.selector);
+        staking.executeRewardRateChange();
+    }
+
+    /// @notice Executing before the delay elapses should revert.
+    /// @dev Covers the "delay not met" branch in `executeRewardRateChange`.
+    function testExecuteRewardRateChange_Revert_BeforeDelay() public {
+        staking.proposeRewardRate(2e18);
+        // Try to execute in the same block (delay not met)
+        vm.expectRevert(); // use specific selector if exposed (e.g., SinglePoolStaking.RateChangeDelayNotMet.selector)
+        staking.executeRewardRateChange();
+    }
+
+    /// @notice Only owner can cancel; cancel clears pending state and prevents execution.
+    /// @dev Also asserts event and that execution after cancel reverts (no pending).
+    function testCancelRewardRateChange_OnlyOwnerAndResets() public {
+        // Propose a change
+        staking.proposeRewardRate(2e18);
+
+        // Non-owner cannot cancel
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        staking.cancelRewardRateChange();
+
+        // Owner cancels
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateChangeCanceled(2e18);
+        staking.cancelRewardRateChange();
+
+        // After cancel, executing should revert (no pending)
+        vm.warp(block.timestamp + 1);
+        vm.expectRevert(); // use specific selector if exposed
+        staking.executeRewardRateChange();
+    }
+
+    /// @notice Proposing a new rate while one is already pending should overwrite the previous pending rate & timestamp.
+    /// @dev Ensures the *latest* proposal is the one that takes effect after the new delay.
+    function testProposeRewardRate_OverridePending_UsesLatest() public {
+        // First proposal
+        uint64 executeAfter1 = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(2e18, executeAfter1);
+        staking.proposeRewardRate(2e18);
+
+        // Second proposal overrides the first in SAME block (updates pending & executeAfter)
+        uint64 executeAfter2 = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(3e18, executeAfter2);
+        staking.proposeRewardRate(3e18);
+
+        // After the new delay, executing should set to 3e18 (the latest)
+        vm.warp(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, 3e18);
+        staking.executeRewardRateChange();
+
+        assertEq(staking.rewardRate(), 3e18, "should execute latest pending rate only");
+    }
+
+    /// @notice Proposing a zero rate (pause) and executing should set emission to 0 after delay.
+    /// @dev Hits the "zero rate" value path; useful for auditors evaluating pause semantics.
+    function testProposeRewardRate_Zero_SetsToZeroAfterDelay() public {
+        // Propose pause
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(0, executeAfter);
+        staking.proposeRewardRate(0);
+
+        // Execute after delay
+        vm.warp(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, 0);
+        staking.executeRewardRateChange();
+
+        assertEq(staking.rewardRate(), 0, "rewardRate not set to zero");
+    }
+
+    /// @notice `cancelRewardRateChange` reverts when there is no pending proposal.
+    function testCancelRewardRateChange_Revert_NoPending() public {
+        vm.expectRevert(SinglePoolStaking.NoPendingRate.selector);
+        staking.cancelRewardRateChange();
     }
 }

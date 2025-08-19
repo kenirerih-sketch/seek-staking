@@ -23,6 +23,8 @@ abstract contract SinglePoolStakingBase is Test {
     event Staked(address indexed sender, address indexed to, uint256 amount);
     event Withdrawn(address indexed sender, address indexed to, uint256 amount);
     event RewardPaid(address indexed user, address indexed to, uint256 amount);
+    event RewardRateProposed(uint256 proposedRate, uint64 executeAfter);
+    event RewardRateChangeCanceled(uint256 canceledRate);
     event RewardRateUpdated(uint256 oldRate, uint256 newRate);
     event RewardsFunded(address indexed from, uint256 amount, uint256 newReserves);
     event EmergencyWithdraw(address indexed user, address indexed to, uint256 amount);
@@ -34,7 +36,7 @@ abstract contract SinglePoolStakingBase is Test {
         stakeToken = new ERC20Token("Stake Token", "STK", 1_000_000 ether, owner);
 
         // Deploy staking: same token for stake & reward, rate = 1 token/s
-        staking = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner);
+        staking = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner, 5e18, 1);
 
         // Distribute balances to actors
         bool aliceTransferSuccess = stakeToken.transfer(alice, 10_000 ether);
