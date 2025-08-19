@@ -28,11 +28,15 @@ contract DeploySinglePoolStaking is Script {
         address rewardToken = HelperUtils.getAddressFromJson(vm, configPath, ".staking.rewardToken");
         address owner = HelperUtils.getAddressFromJson(vm, configPath, ".owner");
         uint256 rewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.rewardRate");
+        uint256 maxRewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.maxRewardRate");
+        uint64 rateChangeDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.rateChangeDelay"));
 
         vm.startBroadcast();
 
         // Deploy the staking contract
-        SinglePoolStaking staking = new SinglePoolStaking(IERC20(stakeToken), IERC20(rewardToken), rewardRate, owner);
+        SinglePoolStaking staking = new SinglePoolStaking(
+            IERC20(stakeToken), IERC20(rewardToken), rewardRate, owner, maxRewardRate, rateChangeDelay
+        );
         stakingAddress = address(staking);
 
         vm.stopBroadcast();

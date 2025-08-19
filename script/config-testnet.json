@@ -3,6 +3,8 @@
   "staking": {
     "stakeToken": "0xe8B39856C78027BEb569B5e399d58f9f1674EaB8",
     "rewardToken": "0xe8B39856C78027BEb569B5e399d58f9f1674EaB8",
-    "rewardRate": 1e18
+    "rewardRate": 1e18,
+    "maxRewardRate": 1e18,
+    "rateChangeDelay": 86400
   }
 }
