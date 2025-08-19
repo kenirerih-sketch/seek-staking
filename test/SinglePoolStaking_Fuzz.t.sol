@@ -6,7 +6,7 @@ import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
 
 /// @title SinglePoolStaking — Fuzz Tests
 /// @notice Property-based tests to exercise proportional accrual, reserves consumption, and rate snapshots.
-/// @dev Bound inputs to stay within pre-funded reserves unless the test targets caps explicitly.
+/// @dev Updated to comply with timelocked, capped reward-rate changes (propose/execute pattern).
 contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
     /// @notice Proportional accrual: for two stakers with arbitrary (bounded) sizes, accrual splits by stake share.
     /// @dev We keep `dt` small enough so `newly = dt*rate` doesn’t hit the reserve cap.
@@ -42,7 +42,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
     }
 
     /// @notice Reserves are consumed on state update by exactly min(elapsed * rate, reservesBefore) when totalStaked > 0.
-    /// @dev If totalStaked == 0, reserves must remain unchanged.
+    /// @dev If totalStaked == 0, reserves must remain unchanged (even when global updates happen).
     function testFuzz_ReservesConsumption(uint96 stakeAmt, uint64 dt) public {
         // Case 1: with staker -> reserves drop by min(elapsed*rate, reservesBefore)
         {
@@ -54,8 +54,8 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
             uint256 beforeRes = staking.rewardReserves();
             vm.warp(block.timestamp + dt);
 
-            // Trigger _updateGlobal via a harmless mutative call
-            staking.setRewardRate(staking.rewardRate());
+            // Trigger _updateGlobal via a claim (consumes reserves deterministically)
+            _getReward(alice);
 
             uint256 afterRes = staking.rewardReserves();
             uint256 expectedDrop = (uint256(dt) * 1e18);
@@ -64,37 +64,48 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
             assertEq(beforeRes - afterRes, expectedDrop, "reserve consumption mismatch (with staker)");
         }
 
-        // Case 2: no stakers -> reserves do not change on update
+        // Case 2: no stakers -> reserves do not change on a global update (via propose/execute)
         {
-            // Fresh instance with reserves and no stakes
-            SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner);
+            // Fresh instance with reserves and no stakes (delay = 1, max = 1e18 to mirror Base)
+            SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner, 1e18, 1);
             stakeToken.approve(address(s), type(uint256).max);
             s.fundRewards(10_000 ether);
 
             uint256 beforeRes2 = s.rewardReserves();
-            vm.warp(block.timestamp + 777);
-            s.setRewardRate(1e18); // _updateGlobal() runs with totalStaked == 0
+
+            // Propose same rate and execute after delay to force a global update
+            s.proposeRewardRate(1e18);
+            vm.warp(block.timestamp + 1);
+            s.executeRewardRateChange();
 
             assertEq(s.rewardReserves(), beforeRes2, "reserves changed with no stakers");
         }
     }
 
     /// @notice Rate snapshot: single staker should earn exactly t1*rate1 + t2*rate2 (no rounding loss in single-staker).
-    /// @dev We bound t1,t2,r2 so total accrued < prefunded reserves.
+    /// @dev We insert the required delay between proposal and execution *inside* t1 by warping `t1-1`, then +1 to execute.
     function testFuzz_SetRewardRate_Snapshot(uint64 t1, uint64 t2, uint96 stakeAmt, uint128 r2) public {
         // Bounds
         stakeAmt = uint96(bound(stakeAmt, 1 ether, 9_000 ether));
-        t1 = uint64(bound(t1, 1, 1_000));
+        t1 = uint64(bound(t1, 1, 1_000)); // must be >= 1 so we can spend 1s on the delay
         t2 = uint64(bound(t2, 0, 1_000)); // allow zero-length second window
-        r2 = uint128(bound(r2, 0, 5e18)); // up to 5 tokens/sec
+
+        // Cap r2 by configured MAX_REWARD_RATE() to avoid revert
+        uint256 maxRate = staking.MAX_REWARD_RATE();
+        r2 = uint128(bound(r2, 0, uint128(maxRate)));
 
         _stake(alice, stakeAmt);
 
-        // Window 1 at default rate = 1e18
-        vm.warp(block.timestamp + t1);
+        // Window 1 at default rate = 1e18. We warp t1-1, then spend +1s for the timelocked execute,
+        // so total old-rate time is exactly t1 and the expected math remains unchanged.
+        vm.warp(block.timestamp + (t1 - 1));
 
-        // Snapshot and switch to r2
-        staking.setRewardRate(uint256(r2));
+        // Propose new rate (owner-only) and wait for delay (Base uses delay=1)
+        staking.proposeRewardRate(uint256(r2));
+        vm.warp(block.timestamp + 1); // execute-after delay
+
+        // Execute switch to r2
+        staking.executeRewardRateChange();
 
         // Window 2 at r2
         vm.warp(block.timestamp + t2);
@@ -104,23 +115,23 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
         _getReward(alice);
         uint256 paid = stakeToken.balanceOf(alice) - before;
 
-        // ---- Expected computed with the SAME rounding as the contract in THIS flow ----
+        // Expected computed with the SAME rounding as the contract in THIS flow
         uint256 total = uint256(stakeAmt);
 
-        // Window 1 (rate1 = 1e18)
+        // Window 1 (rate1 = 1e18) for exactly t1 seconds
         uint256 newly1 = uint256(t1) * 1e18;
         uint256 deltaRpt1 = (newly1 * 1e18) / total; // floor
 
-        // Window 2 (rate2 = r2)
+        // Window 2 (rate2 = r2) for t2 seconds
         uint256 newly2 = uint256(t2) * uint256(r2);
         uint256 deltaRpt2 = (newly2 * 1e18) / total; // floor
 
-        // IMPORTANT: user is updated ONCE at the end → single floor on the SUM
+        // Single user updated once → single floor on the SUM of deltas
         uint256 expected = (total * (deltaRpt1 + deltaRpt2)) / 1e18;
 
         assertEq(paid, expected, "snapshot + new-rate accrual mismatch (single staker)");
 
-        // Optional sanity: never overpay the ideal (no rounding)
+        // Sanity: never overpay the ideal (no rounding)
         uint256 ideal = newly1 + newly2;
         assertLe(paid, ideal, "paid exceeds idealized accrual");
     }
