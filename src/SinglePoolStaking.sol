@@ -29,7 +29,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// - This implementation assumes **standard ERC-20 semantics** for staking token transfers
 ///   (i.e., no fee-on-transfer on `stake()`/`withdraw()`). `fundRewards()` is robust via balance delta.
 ///
-
 contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -46,7 +45,7 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     // ====== Emissions config ======
 
     /// @notice Rewards emitted per second.
-    /// @dev Owner can adjust via `setRewardRate()`. All changes snapshot history first.
+    /// @dev Owner can adjust via governance-timelocked flow (see `proposeRewardRate` / `executeRewardRateChange`).
     uint256 public rewardRate;
 
     /// @notice Last timestamp when global rewards were accounted (i.e., when `_updateGlobal()` last ran).
@@ -123,6 +122,15 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param amount Amount rescued.
     event RescueTokens(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Emitted when a reward rate change is proposed with a timelock.
+    /// @param proposedRate The proposed reward rate (tokens/sec).
+    /// @param executeAfter The earliest timestamp when execution is allowed.
+    event RewardRateProposed(uint256 proposedRate, uint64 executeAfter);
+
+    /// @notice Emitted when a pending reward rate change is canceled.
+    /// @param canceledRate The previously proposed reward rate that was canceled.
+    event RewardRateChangeCanceled(uint256 canceledRate);
+
     // ====== Errors ======
 
     /// @notice Thrown when a provided amount is zero where a positive value is required.
@@ -134,6 +142,32 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @notice Thrown when an operation targets an invalid token address or disallowed token.
     error InvalidToken();
 
+    /// @notice Thrown when a proposed rate exceeds `MAX_REWARD_RATE`.
+    /// @param requested The requested rate.
+    /// @param max The maximum allowed rate.
+    error RewardRateTooHigh(uint256 requested, uint256 max);
+
+    /// @notice Thrown when trying to execute a rate change before the timelock elapses.
+    /// @param executeAfter The timestamp after which execution is allowed.
+    error RateChangeDelayNotMet(uint64 executeAfter);
+
+    /// @notice Thrown when no pending reward rate exists to execute or cancel.
+    error NoPendingRate();
+
+    // ====== Governance params (constructor-initialized) ======
+
+    /// @notice Maximum allowed emission rate (tokens/sec).
+    uint256 public MAX_REWARD_RATE;
+
+    /// @notice Delay required between proposing and executing a reward rate change.
+    uint64 public RATE_CHANGE_DELAY;
+
+    /// @notice Proposed reward rate pending execution after `rateChangeExecuteAfter`.
+    uint256 public pendingRewardRate;
+
+    /// @notice Earliest timestamp when the pending reward rate can be executed.
+    uint64 public rateChangeExecuteAfter;
+
     // ====== Construction ======
 
     /// @notice Deploy the staking pool.
@@ -141,16 +175,29 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param _rewardToken ERC-20 token used for rewards (may equal `_stakeToken`).
     /// @param _initialRewardRate Initial `rewardRate` in tokens per second.
     /// @param initialOwner Address to receive contract ownership.
-    /// @dev Sets `lastUpdateTime` to `block.timestamp` to start time-based accounting from deployment.
-    constructor(IERC20 _stakeToken, IERC20 _rewardToken, uint256 _initialRewardRate, address initialOwner)
-        Ownable(initialOwner)
-    {
+    /// @param _maxRewardRate Governance max for `rewardRate` (tokens/sec).
+    /// @param _rateChangeDelay Timelock delay for rate changes (in seconds).
+    /// @dev Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.
+    constructor(
+        IERC20 _stakeToken,
+        IERC20 _rewardToken,
+        uint256 _initialRewardRate,
+        address initialOwner,
+        uint256 _maxRewardRate,
+        uint64 _rateChangeDelay
+    ) Ownable(initialOwner) {
         if (address(_stakeToken) == address(0)) revert InvalidToken();
         if (address(_rewardToken) == address(0)) revert InvalidToken();
 
         STAKE_TOKEN = _stakeToken;
         REWARD_TOKEN = _rewardToken;
+
+        MAX_REWARD_RATE = _maxRewardRate;
+        RATE_CHANGE_DELAY = _rateChangeDelay;
+
+        if (_initialRewardRate > MAX_REWARD_RATE) revert RewardRateTooHigh(_initialRewardRate, MAX_REWARD_RATE);
         rewardRate = _initialRewardRate;
+
         lastUpdateTime = uint64(block.timestamp);
     }
 
@@ -207,13 +254,49 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     //          Admin
     // =========================
 
-    /// @notice Adjust the rewards emission rate (tokens per second).
-    /// @dev Snapshots global accounting first (`_updateGlobal()`), then updates `rewardRate`.
-    /// @param _newRate New `rewardRate` value.
-    function setRewardRate(uint256 _newRate) external onlyOwner {
+    /// @notice Propose a new reward emission rate (tokens per second), subject to a delay.
+    /// @dev Enforces `MAX_REWARD_RATE`. Allows pausing with `0`. Emits `RewardRateProposed`.
+    /// @param _newRate The proposed `rewardRate` value (tokens/sec).
+    function proposeRewardRate(uint256 _newRate) external onlyOwner {
+        if (_newRate > MAX_REWARD_RATE) revert RewardRateTooHigh(_newRate, MAX_REWARD_RATE);
+        uint64 execAfter = uint64(block.timestamp) + RATE_CHANGE_DELAY;
+
+        pendingRewardRate = _newRate;
+        rateChangeExecuteAfter = execAfter;
+
+        emit RewardRateProposed(_newRate, execAfter);
+    }
+
+    /// @notice Execute a previously proposed reward rate after the timelock elapses.
+    /// @dev Snapshots global accounting first, then updates `rewardRate` and emits `RewardRateUpdated`.
+    function executeRewardRateChange() external {
+        uint64 execAfter = rateChangeExecuteAfter;
+        if (execAfter == 0) revert NoPendingRate();
+        if (block.timestamp < execAfter) revert RateChangeDelayNotMet(execAfter);
+
         _updateGlobal();
-        emit RewardRateUpdated(rewardRate, _newRate);
-        rewardRate = _newRate;
+
+        uint256 old = rewardRate;
+        uint256 next = pendingRewardRate;
+
+        // clear pending first
+        pendingRewardRate = 0;
+        rateChangeExecuteAfter = 0;
+
+        emit RewardRateUpdated(old, next);
+        rewardRate = next;
+    }
+
+    /// @notice Cancel a pending reward rate change.
+    /// @dev Clears pending state and emits `RewardRateChangeCanceled`.
+    function cancelRewardRateChange() external onlyOwner {
+        uint256 oldPending = pendingRewardRate;
+        if (oldPending == 0) revert NoPendingRate();
+
+        pendingRewardRate = 0;
+        rateChangeExecuteAfter = 0;
+
+        emit RewardRateChangeCanceled(oldPending);
     }
 
     /// @notice Prefund rewards into the pool.
