@@ -41,7 +41,7 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
         address owner = address(this);
 
         t = new ERC20Token("Stake", "STK", 10_000_000 ether, owner);
-        s = new SinglePoolStaking(t, t, 1e18, owner);
+        s = new SinglePoolStaking(t, t, 1e18, owner, 1e18, 1);
 
         // Allocate and seed actors
         actors = new address[](ACTOR_COUNT);
