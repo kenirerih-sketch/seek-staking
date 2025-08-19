@@ -238,10 +238,13 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         // =========================================================================================
         {
             // t = 30: pause emissions (set rewardRate=0) and then top-up reserves
-            vm.warp(t0 + 30);
+            vm.warp(t0 + 29);
 
             // IMPORTANT: pause first — this snapshots/consumes any pending accrual up to t=30
-            staking.setRewardRate(0);
+            staking.proposeRewardRate(0);
+
+            vm.warp(t0 + 30);
+            staking.executeRewardRateChange();
 
             // Now capture reserves AFTER the snapshot, so the top-up is a clean +delta check
             uint256 reservesBeforeTopup = staking.rewardReserves();
@@ -251,8 +254,11 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             assertEq(staking.rewardReserves(), reservesBeforeTopup + 500 ether, "reserves top-up mismatch");
 
             // t = 35: resume at 2 tokens/sec
+            vm.warp(t0 + 34);
+            staking.proposeRewardRate(2e18);
+
             vm.warp(t0 + 35);
-            staking.setRewardRate(2e18);
+            staking.executeRewardRateChange();
 
             // Check: no accrual happened during pause window [30,35) for any user (view path stable)
             uint256 a = staking.earned(alice);
@@ -269,7 +275,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         // =========================================================================================
         {
             // Fresh pool with tiny reserves to fully exercise cap in both view and state paths
-            SinglePoolStaking capped = new SinglePoolStaking(stakeToken, stakeToken, 5e18, address(this)); // 5 tokens/sec
+            SinglePoolStaking capped = new SinglePoolStaking(stakeToken, stakeToken, 5e18, address(this), 5e18, 1); // 5 tokens/sec
             stakeToken.approve(address(capped), type(uint256).max);
             capped.fundRewards(7 ether); // reserves only 7 tokens
 
