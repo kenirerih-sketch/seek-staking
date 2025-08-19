@@ -104,6 +104,15 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param newRate New `rewardRate`.
     event RewardRateUpdated(uint256 oldRate, uint256 newRate);
 
+    /// @notice Emitted when a reward rate change is proposed with a timelock.
+    /// @param proposedRate The proposed reward rate (tokens/sec).
+    /// @param executeAfter The earliest timestamp when execution is allowed.
+    event RewardRateProposed(uint256 proposedRate, uint64 executeAfter);
+
+    /// @notice Emitted when a pending reward rate change is canceled.
+    /// @param canceledRate The previously proposed reward rate that was canceled.
+    event RewardRateChangeCanceled(uint256 canceledRate);
+
     /// @notice Emitted when rewards are prefunded.
     /// @param from Funding source (owner).
     /// @param amount Net tokens received (uses balance delta, so may differ from input due to token quirks).
@@ -121,15 +130,6 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param to Recipient of rescued tokens.
     /// @param amount Amount rescued.
     event RescueTokens(address indexed token, address indexed to, uint256 amount);
-
-    /// @notice Emitted when a reward rate change is proposed with a timelock.
-    /// @param proposedRate The proposed reward rate (tokens/sec).
-    /// @param executeAfter The earliest timestamp when execution is allowed.
-    event RewardRateProposed(uint256 proposedRate, uint64 executeAfter);
-
-    /// @notice Emitted when a pending reward rate change is canceled.
-    /// @param canceledRate The previously proposed reward rate that was canceled.
-    event RewardRateChangeCanceled(uint256 canceledRate);
 
     // ====== Errors ======
 

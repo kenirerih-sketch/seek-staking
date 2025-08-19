@@ -65,6 +65,9 @@ test:
 coverage:
 	forge coverage
 
+coverage-report:
+	forge coverage --report lcov
+
 build:
 	forge build
 
