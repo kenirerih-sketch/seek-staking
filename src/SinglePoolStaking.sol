@@ -199,6 +199,9 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         rewardRate = _initialRewardRate;
 
         lastUpdateTime = uint64(block.timestamp);
+
+        // Emit event for initial rate setting
+        emit RewardRateUpdated(0, _initialRewardRate);
     }
 
     // =========================

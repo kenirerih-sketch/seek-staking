@@ -213,6 +213,13 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1);
     }
 
+    /// @notice Constructor: zero-address guard for contract owner.
+    /// @dev Covers `OwnerInvalidOwner` branch.
+    function testConstructor_RevertOnZeroOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 1);
+    }
+
     /// @notice `balanceOf` reflects user stake balance.
     /// @dev Mirrors internal users mapping state via public view.
     function testView_balanceOf() public {
