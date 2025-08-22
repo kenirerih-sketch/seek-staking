@@ -9,51 +9,76 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract DeploySinglePoolStaking is Script {
     address public stakingAddress;
 
-    function run(bool _testMode) external {
-        // Set the test mode flag
-        bool testMode = _testMode;
+    struct Cfg {
+        address stakeToken;
+        address rewardToken;
+        address owner;
+        uint256 rewardRate;
+        uint256 maxRewardRate;
+        uint64 rateChangeDelay;
+        uint64 withdrawDelay;
+        uint256 minStakeAmount;
+        string chainName;
+        string configPath;
+    }
 
-        // Get the chain name based on the current chain ID
-        string memory chainName = HelperUtils.getChainName(block.chainid);
-        bool isMainnet = HelperUtils.getIsMainnet(block.chainid);
-
-        // Define the path to the config.json file
+    function run(bool testMode) external {
+        // Derive basic paths first
         string memory root = vm.projectRoot();
+
+        // These two are short-lived locals; fine to keep here
+        bool isMainnet = HelperUtils.getIsMainnet(block.chainid);
+        string memory chainName = HelperUtils.getChainName(block.chainid);
+
+        // Build config path using minimal locals
         string memory configPath = isMainnet
             ? string.concat(root, "/script/config-mainnet.json")
             : string.concat(root, "/script/config-testnet.json");
 
-        // Extract token parameters from the config.json file
-        address stakeToken = HelperUtils.getAddressFromJson(vm, configPath, ".staking.stakeToken");
-        address rewardToken = HelperUtils.getAddressFromJson(vm, configPath, ".staking.rewardToken");
-        address owner = HelperUtils.getAddressFromJson(vm, configPath, ".owner");
-        uint256 rewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.rewardRate");
-        uint256 maxRewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.maxRewardRate");
-        uint64 rateChangeDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.rateChangeDelay"));
+        // Load config into a single memory struct (reduces stack usage)
+        Cfg memory cfg = _loadConfig(configPath, chainName);
 
         vm.startBroadcast();
 
-        // Deploy the staking contract
         SinglePoolStaking staking = new SinglePoolStaking(
-            IERC20(stakeToken), IERC20(rewardToken), rewardRate, owner, maxRewardRate, rateChangeDelay
+            IERC20(cfg.stakeToken),
+            IERC20(cfg.rewardToken),
+            cfg.rewardRate,
+            cfg.owner,
+            cfg.maxRewardRate,
+            cfg.rateChangeDelay,
+            cfg.withdrawDelay,
+            cfg.minStakeAmount
         );
         stakingAddress = address(staking);
 
         vm.stopBroadcast();
 
-        // Skip file writing in test mode
         if (!testMode) {
-            // Prepare to write the deployed token address to a JSON file
-            string memory jsonObj = "internal_key";
-            string memory key = string(abi.encodePacked("deploySinglePoolStaking", chainName));
-            string memory finalJson = vm.serializeAddress(jsonObj, key, stakingAddress);
-
-            // Define the output file path for the deployed token address
-            string memory fileName =
-                string(abi.encodePacked("./script/output/deploySinglePoolStaking_", chainName, ".json"));
-
-            console.log("Writing deployed staking address to file:", fileName);
-            vm.writeJson(finalJson, fileName);
+            _writeOutput(cfg.chainName, stakingAddress);
         }
+    }
+
+    function _loadConfig(string memory configPath, string memory chainName) internal view returns (Cfg memory cfg) {
+        cfg.stakeToken = HelperUtils.getAddressFromJson(vm, configPath, ".staking.stakeToken");
+        cfg.rewardToken = HelperUtils.getAddressFromJson(vm, configPath, ".staking.rewardToken");
+        cfg.owner = HelperUtils.getAddressFromJson(vm, configPath, ".owner");
+        cfg.rewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.rewardRate");
+        cfg.maxRewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.maxRewardRate");
+        cfg.rateChangeDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.rateChangeDelay"));
+        cfg.withdrawDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.withdrawDelay"));
+        cfg.minStakeAmount = HelperUtils.getUintFromJson(vm, configPath, ".staking.minStakeAmount");
+        cfg.chainName = chainName;
+        cfg.configPath = configPath;
+    }
+
+    function _writeOutput(string memory chainName, address deployed) internal {
+        string memory jsonObj = "internal_key";
+        string memory key = string.concat("deploySinglePoolStaking", chainName);
+        string memory finalJson = vm.serializeAddress(jsonObj, key, deployed);
+        string memory fileName = string.concat("./script/output/deploySinglePoolStaking_", chainName, ".json");
+
+        console.log("Writing deployed staking address to file:", fileName);
+        vm.writeJson(finalJson, fileName);
     }
 }
