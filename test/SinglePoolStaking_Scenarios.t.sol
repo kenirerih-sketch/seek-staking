@@ -8,7 +8,7 @@ import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
 /// @notice Realistic timelines & complex flows (kept separate to avoid stack pressure).
 contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
     /// @notice Timeline accrual with multiple join/leave events; verifies per-user rewards across segments.
-    /// @dev Uses BaseSinglePoolStaking actors (`alice`, `bob`, `chad`) and helpers (`_stake`, `_withdraw`).
+    /// @dev Uses BaseSinglePoolStaking actors (`alice`, `bob`, `chad`) and helpers (`_stake`).
     ///      Assumptions:
     ///        - rewardRate = 1e18 (1 token/sec)
     ///        - stakeToken == rewardToken, reserves are ample (prefunded in Base `setUp`)
@@ -69,14 +69,15 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         assertEq(staking.earned(bob), 7_500_000_000_000_000_000, "t=25 bob earned (7.5)");
         assertEq(staking.earned(chad), 0, "t=25 chad earned");
 
-        // ---- t = 30: Alice unstakes 100 ----
+        // ---- t = 30: Alice requests withdrawal of 100 (removes from staking immediately) ----
         vm.warp(t0 + 30);
-        _withdraw(alice, 100 ether); // triggers global update to t=30 (S3 accrual)
+        vm.prank(alice);
+        staking.requestWithdrawal(100 ether); // triggers global update to t=30 (S3 accrual)
 
         // S3 accrual per 100 tokens (see @dev): 1_666_666_666_666_666_600 wei
         uint256 s3Per100 = 1_666_666_666_666_666_600;
 
-        // Check balances & earned after Alice leaves
+        // Check balances & earned after Alice leaves (pending withdrawal)
         assertEq(staking.totalStaked(), 200 ether, "t=30 totalStaked after Alice leave");
         assertEq(staking.balanceOf(alice), 0, "t=30 alice stake");
         assertEq(staking.balanceOf(bob), 100 ether, "t=30 bob stake");
@@ -86,9 +87,10 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         assertEq(staking.earned(bob), 9_166_666_666_666_666_600, "t=30 bob earned (7.5 + ~1.6666666)");
         assertEq(staking.earned(chad), s3Per100, "t=30 chad earned (~1.6666666)");
 
-        // ---- t = 37: Chad unstakes 100 ----
+        // ---- t = 37: Chad requests withdrawal of 100 (removed immediately) ----
         vm.warp(t0 + 37);
-        _withdraw(chad, 100 ether); // triggers global update to t=37 (S4 accrual)
+        vm.prank(chad);
+        staking.requestWithdrawal(100 ether); // triggers global update to t=37 (S4 accrual)
 
         // After S4 (7s at 200 total): +3.5 ether to Bob and Chad
         assertEq(staking.totalStaked(), 100 ether, "t=37 totalStaked after Chad leave");
@@ -104,21 +106,21 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         assertEq(staking.totalStaked(), 100 ether, "t=42 totalStaked");
         assertEq(staking.balanceOf(bob), 100 ether, "t=42 bob stake");
 
-        // S5 adds +5 ether to Bob (view path is sufficient here; rate unchanged)
+        // S5 adds +5 ether to Bob
         assertEq(staking.earned(bob), 17_666_666_666_666_666_600, "t=42 bob total earned");
     }
 
     /// @notice End-to-end realistic scenario covering: staggered joins/leaves, partial withdrawals, multiple stakes,
     ///         frequent vs. infrequent claiming, reserve top-ups, rate pause/resume, reserve exhaustion (cap),
-    ///         same-block updates, auto-compounder flow (getRewardTo + stakeFor), and post-exit claim behavior.
-    /// @dev Uses BaseSinglePoolStaking actors (`alice`, `bob`, `chad`, `vault`) and helpers (`_stake`, `_withdraw`, `_getReward`).
+    ///         same-block updates, auto-compounder flow (getRewardTo + stakeFor), and post-withdraw claim behavior.
+    /// @dev Uses BaseSinglePoolStaking actors (`alice`, `bob`, `chad`, `vault`) and helpers (`_stake`, `_getReward`).
     ///      Assumptions:
     ///        - rewardRate = 1e18 (1 token/sec), stake token == reward token
     ///        - Reserves are prefunded in Base `setUp()`
     ///      Goals:
     ///        - Claims frequency should not affect total accrual for identical stake windows
     ///        - Joining/leaving affects only future accrual (snapshot on update)
-    ///        - Exercise pause/resume (`setRewardRate`), reserve top-ups, and reserve-cap (view + state paths)
+    ///        - Exercise pause/resume, reserve top-ups, and reserve-cap (view + state paths)
     ///        - Prove same-block updates do not mint phantom rewards
     function testScenario_Realistic_ComplexFlows() public {
         uint256 t0 = block.timestamp;
@@ -164,7 +166,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             staking.getReward(); // claim at t=15
             uint256 alicePaid1 = stakeToken.balanceOf(alice) - aliceBalBeforeClaim1;
 
-            // Bob joined at t=10, so at t=15 Bob has 2.5 (not 12.5)
+            // Bob joined at t=10, so at t=15 Bob has 2.5
             assertEq(staking.earned(bob), 2.5 ether, "t=15 bob earned (no claim)");
             // Alice had 10 (S1) + 2.5 (S2 first half) paid out
             assertEq(alicePaid1, 12.5 ether, "t=15 alice first claim paid");
@@ -260,7 +262,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             vm.warp(t0 + 35);
             staking.executeRewardRateChange();
 
-            // Check: no accrual happened during pause window [30,35) for any user (view path stable)
+            // Check: no accrual happened during pause window [30,35) for any user
             uint256 a = staking.earned(alice);
             uint256 b = staking.earned(bob);
             uint256 c = staking.earned(chad);
@@ -275,7 +277,16 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         // =========================================================================================
         {
             // Fresh pool with tiny reserves to fully exercise cap in both view and state paths
-            SinglePoolStaking capped = new SinglePoolStaking(stakeToken, stakeToken, 5e18, address(this), 5e18, 1); // 5 tokens/sec
+            SinglePoolStaking capped = new SinglePoolStaking(
+                stakeToken,
+                stakeToken,
+                5e18, // 5 tokens/sec
+                address(this),
+                5e18, // MAX_REWARD_RATE
+                1, // RATE_CHANGE_DELAY
+                1, // withdrawDelay
+                0 // minStakeAmount
+            );
             stakeToken.approve(address(capped), type(uint256).max);
             capped.fundRewards(7 ether); // reserves only 7 tokens
 
@@ -321,32 +332,233 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
         }
 
         // =========================================================================================
-        // 7) Post-exit claim: user's owed stays constant after principal fully withdrawn
+        // 7) Post-withdraw claim: user's owed stays constant after principal fully removed (via delayed flow)
         // =========================================================================================
         {
             // Ensure Bob has some additional accrual after resume
             vm.warp(t0 + 40); // with rate=2/sec active since t=35
-            uint256 bobEarnBeforeExit = staking.earned(bob);
+            uint256 bobEarnBefore = staking.earned(bob);
 
-            // Bob withdraws all principal at t=40; rewards remain unclaimed
-            vm.startPrank(bob);
-            staking.withdraw(staking.balanceOf(bob));
-            vm.stopPrank();
+            // Bob requests full withdrawal at t=40 (immediately removes from staking)
+            uint256 bobPrincipal = staking.balanceOf(bob);
+            vm.prank(bob);
+            staking.requestWithdrawal(bobPrincipal);
 
-            assertEq(staking.balanceOf(bob), 0, "bob principal not fully withdrawn");
-            uint256 bobEarnRightAfterExit = staking.earned(bob);
-            assertEq(bobEarnRightAfterExit, bobEarnBeforeExit, "post-exit, earned snapshot not preserved");
+            assertEq(staking.balanceOf(bob), 0, "bob principal not removed on request");
+            uint256 bobEarnRightAfter = staking.earned(bob);
+            assertEq(bobEarnRightAfter, bobEarnBefore, "post-request, earned snapshot not preserved");
 
             // Wait more time; since balance=0, earned should remain unchanged
             vm.warp(t0 + 50);
-            assertEq(staking.earned(bob), bobEarnBeforeExit, "accrual after exit with zero balance");
+            assertEq(staking.earned(bob), bobEarnBefore, "accrual after zero balance");
 
-            // Now Bob claims once; amount should equal the preserved earned
+            // Claim owed rewards once; amount should equal the preserved earned
             uint256 bobBalBeforeFinalClaim = stakeToken.balanceOf(bob);
             vm.prank(bob);
             staking.getReward();
             uint256 bobPaidFinal = stakeToken.balanceOf(bob) - bobBalBeforeFinalClaim;
-            assertEq(bobPaidFinal, bobEarnBeforeExit, "final claim != preserved earned after exit");
+            assertEq(bobPaidFinal, bobEarnBefore, "final claim != preserved earned after request");
         }
+    }
+
+    /// @notice Cancel a pending withdrawal: no backfill for pending period, accrues only after re-stake.
+    function testScenario_CancelWithdrawal_NoBackfillThenResumeAccrual() public {
+        _stake(alice, 300 ether);
+        vm.warp(block.timestamp + 5);
+
+        // Request 100: remaining staked = 200
+        vm.prank(alice);
+        staking.requestWithdrawal(100 ether);
+
+        uint64 d = staking.withdrawDelay();
+        // Accrue during pending on remaining 200 only
+        vm.warp(block.timestamp + d);
+
+        // Snapshot earned before cancel
+        uint256 earnedBeforeCancel = staking.earned(alice);
+
+        // Cancel: 100 returns to staking; should NOT backfill rewards for the pending period
+        vm.prank(alice);
+        staking.cancelWithdrawal();
+
+        assertEq(staking.balanceOf(alice), 300 ether, "principal not restored on cancel");
+
+        // Warp more; accrues on full 300 after cancel
+        vm.warp(block.timestamp + 3);
+        uint256 earnedAfter = staking.earned(alice);
+
+        // After cancel, incremental earned ≈ 3 tokens (only one staker @ 1 token/s)
+        assertEq(earnedAfter - earnedBeforeCancel, 3 ether, "post-cancel accrual incorrect");
+    }
+
+    /// @notice withdrawDelay = 0 allows same-block completion; earned must not change on completion.
+    function testScenario_WithdrawDelayZero_ImmediateComplete() public {
+        // Owner sets delay to 0
+        staking.setWithdrawDelay(0);
+
+        _stake(alice, 200 ether);
+        vm.warp(block.timestamp + 4);
+
+        vm.prank(alice);
+        staking.requestWithdrawal(50 ether);
+
+        uint256 before = staking.earned(alice);
+
+        // Same block completion is allowed with delay=0
+        vm.prank(alice);
+        staking.completeWithdrawal();
+
+        assertEq(staking.balanceOf(alice), 150 ether, "principal after complete");
+        assertEq(staking.earned(alice), before, "earned changed on same-block completion");
+    }
+
+    /// @notice Emergency exit safety: disabled by default, enabled by owner, returns staked+pending and forfeits rewards.
+    function testScenario_EmergencyExit_ToggleAndForfeit_MultiUser() public {
+        _stake(alice, 120 ether);
+        _stake(bob, 80 ether);
+        vm.warp(block.timestamp + 5);
+
+        // Move portion to pending for alice
+        vm.prank(alice);
+        staking.requestWithdrawal(20 ether);
+
+        // Disabled path reverts
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.EmergencyExitDisabled.selector);
+        staking.emergencyWithdraw();
+
+        // Enable and exit
+        staking.setEmergencyExitEnabled(true);
+
+        uint256 aBefore = stakeToken.balanceOf(alice);
+        vm.prank(alice);
+        staking.emergencyWithdraw(); // refunds 100 (staked) + 20 (pending) = 120
+
+        assertEq(stakeToken.balanceOf(alice) - aBefore, 120 ether, "alice refund mismatch");
+        assertEq(staking.balanceOf(alice), 0, "alice stake not zeroed");
+        assertEq(staking.earned(alice), 0, "alice rewards not forfeited");
+
+        // Bob still can accrue/claim normally
+        vm.warp(block.timestamp + 4);
+        uint256 bBefore = stakeToken.balanceOf(bob);
+        vm.prank(bob);
+        staking.getReward();
+        assertGt(stakeToken.balanceOf(bob) - bBefore, 0, "bob should receive rewards");
+    }
+
+    /// @notice Conservation check: sum of users' paid rewards == reserves consumed (in this window).
+    function testScenario_Conservation_PaidEqualsReservesConsumed() public {
+        // Fresh pool to isolate window
+        SinglePoolStaking s = new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // 1 token/sec
+            address(this),
+            5e18, // MAX_REWARD_RATE
+            1, // RATE_CHANGE_DELAY
+            1, // withdrawDelay
+            0 // minStakeAmount
+        );
+        stakeToken.approve(address(s), type(uint256).max);
+        s.fundRewards(1_000 ether);
+
+        address u1 = makeAddr("consU1");
+        address u2 = makeAddr("consU2");
+        stakeToken.transfer(u1, 100 ether);
+        stakeToken.transfer(u2, 100 ether);
+
+        vm.startPrank(u1);
+        stakeToken.approve(address(s), type(uint256).max);
+        s.stake(100 ether);
+        vm.stopPrank();
+
+        vm.startPrank(u2);
+        stakeToken.approve(address(s), type(uint256).max);
+        s.stake(100 ether);
+        vm.stopPrank();
+
+        // Accrue 10s; then both claim in the same block
+        vm.warp(block.timestamp + 10);
+        uint256 resBefore = s.rewardReserves();
+
+        uint256 b1 = stakeToken.balanceOf(u1);
+        vm.prank(u1);
+        s.getReward();
+        uint256 paid1 = stakeToken.balanceOf(u1) - b1;
+
+        uint256 b2 = stakeToken.balanceOf(u2);
+        vm.prank(u2);
+        s.getReward();
+        uint256 paid2 = stakeToken.balanceOf(u2) - b2;
+
+        uint256 resAfter = s.rewardReserves();
+        assertEq((resBefore - resAfter), paid1 + paid2, "consumption != sum(paid)");
+    }
+
+    /// @notice Changing rate while a pending withdrawal exists does not affect unlock time and accrual behaves correctly.
+    function testScenario_RateChangeDuringPendingWithdrawal_NoUnlockDrift() public {
+        _stake(alice, 300 ether);
+
+        vm.warp(block.timestamp + 5);
+        // Move 100 to pending, keep 200 staked
+        vm.prank(alice);
+        staking.requestWithdrawal(100 ether);
+
+        (uint256 amt, uint64 unlockAtBefore) = staking.pendingWithdrawals(alice);
+        assertEq(amt, 100 ether, "pending amount mismatch");
+
+        // Change rate mid-pending: propose 2x, execute after delay
+        uint64 rdelay = staking.RATE_CHANGE_DELAY();
+        staking.proposeRewardRate(2e18);
+        vm.warp(block.timestamp + rdelay);
+        staking.executeRewardRateChange();
+        assertEq(staking.rewardRate(), 2e18, "rate not updated");
+
+        // Unlock timestamp must not change
+        (, uint64 unlockAtAfter) = staking.pendingWithdrawals(alice);
+        assertEq(unlockAtAfter, unlockAtBefore, "unlock time drifted");
+
+        // Accrue some time at new rate on remaining 200 stake
+        vm.warp(block.timestamp + 3);
+        uint256 beforeEarned = staking.earned(alice);
+        assertGt(beforeEarned, 0, "no accrual after rate change with remaining stake");
+    }
+
+    /// @notice Extremely long warp is safe: accrual capped by reserves, no overflow.
+    function testScenario_LargeWarp_ReserveCap_NoOverflow() public {
+        // Fresh pool with controlled reserves
+        SinglePoolStaking s = new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // 1 token/sec
+            address(this),
+            5e18, // MAX_REWARD_RATE
+            1, // RATE_CHANGE_DELAY
+            1, // withdrawDelay (arbitrary for this test)
+            0 // minStakeAmount
+        );
+
+        // Fund only 3 ether in reserves
+        stakeToken.approve(address(s), type(uint256).max);
+        s.fundRewards(3 ether);
+
+        // Alice stakes 1 ether into the fresh pool
+        vm.startPrank(alice);
+        stakeToken.approve(address(s), type(uint256).max);
+        s.stake(1 ether);
+        vm.stopPrank();
+
+        // Huge warp — theoretical newly = 10,000,000 tokens, but reserves cap at 3 ether
+        vm.warp(block.timestamp + 10_000_000);
+
+        // View path is capped by reserves
+        assertEq(s.earned(alice), 3 ether, "cap not respected after huge warp");
+
+        // Claim consumes exactly 3 ether from reserves
+        uint256 resBefore = s.rewardReserves();
+        vm.prank(alice);
+        s.getReward();
+        uint256 resAfter = s.rewardReserves();
+        assertEq(resBefore - resAfter, 3 ether, "reserves not consumed correctly");
     }
 }
