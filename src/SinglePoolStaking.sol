@@ -34,11 +34,11 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
 
     // ====== Immutable tokens ======
 
-    /// @notice Token users deposit as principal (a.k.a. staked token).
+    /// @notice Token users deposit as principal (a.k.a. staked token). Standard ERC-20 (no fee/rebase).
     /// @dev Immutable at construction.
     IERC20 public immutable STAKE_TOKEN;
 
-    /// @notice Token paid out as rewards.
+    /// @notice Token paid out as rewards. Standard ERC-20 (no fee/rebase).
     /// @dev Immutable at construction; can be same as `STAKE_TOKEN`.
     IERC20 public immutable REWARD_TOKEN;
 
@@ -61,6 +61,13 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     ///      user claims **do not** touch `rewardReserves`.
     uint256 public rewardReserves;
 
+    /// @notice Flag to enable emergency exit mode.
+    /// @dev When enabled, users can withdraw their principal immediately, forfeiting any accrued rewards.
+    ///      This is a governance-controlled feature that can be toggled by the owner.
+    ///      When disabled, users must use the delayed withdrawal path to claim their principal.
+    ///      This flag is set to `false` by default and can be toggled by the owner.
+    bool public emergencyExitEnabled;
+
     // ====== Staking state ======
 
     /// @notice Total staked principal held by the contract.
@@ -79,19 +86,71 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @notice Mapping of user address to their staking accounting data.
     mapping(address => User) public users;
 
+    // ====== Delayed withdrawal state ======
+
+    /// @notice Lock duration between withdrawal request and claim (in seconds).
+    /// @dev Configurable by owner. If set to 0, withdrawals can be completed immediately after requesting.
+    uint64 public withdrawDelay;
+
+    /// @notice User withdrawal request data.
+    /// @param amount Requested amount that was removed from staking and no longer earns rewards.
+    /// @param unlockTimestamp When the withdrawal can be completed.
+    struct PendingWithdrawal {
+        uint256 amount;
+        uint64 unlockTimestamp;
+    }
+
+    /// @notice Mapping of user to their single active pending withdrawal (if any).
+    mapping(address => PendingWithdrawal) public pendingWithdrawals;
+
     // ====== Events ======
+
+    /// @notice Emitted when the contract is initialized with its parameters.
+    /// @param _stakeToken The token users deposit as principal.
+    /// @param _rewardToken The token used for rewards (may equal `_stakeToken`).
+    /// @param _initialRewardRate Initial `rewardRate` in tokens per second.
+    /// @param initialOwner Address to receive contract ownership.
+    /// @param _maxRewardRate Governance max for `rewardRate` (tokens/sec).
+    /// @param _rateChangeDelay Timelock delay for rate changes (in seconds).
+    /// @param _initialWithdrawDelay Initial locked withdrawal delay (in seconds).
+    /// @param _minStakeAmount Minimum amount required to stake.
+    /// @dev Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.
+    ///      Emits `RewardRateUpdated`, `WithdrawDelayUpdated`, and `MinStakeAmountUpdated` events.
+    /// @dev This event is emitted when the contract is initialized with its parameters.
+    ///      It provides a record of the initial configuration of the staking pool.
+    ///      This is useful for transparency and auditing purposes, allowing users to
+    ///      verify the initial setup of the staking contract.
+    /// @dev This event is emitted when the contract is initialized with its parameters.
+    event Initialized(
+        address indexed _stakeToken,
+        address indexed _rewardToken,
+        uint256 _initialRewardRate,
+        address indexed initialOwner,
+        uint256 _maxRewardRate,
+        uint64 _rateChangeDelay,
+        uint64 _initialWithdrawDelay,
+        uint256 _minStakeAmount
+    );
+
+    /// @notice Emitted when emergency exit mode is enabled/disabled.
+    /// @dev When enabled, users can withdraw their principal immediately, forfeiting any accrued rewards.
+    ///      When disabled, users must use the delayed withdrawal path to claim their principal.
+    /// @param enabled True if emergency exits are enabled; false if disabled.
+    event EmergencyExitEnabled(bool enabled);
+
+    /// @notice Emitted when the minimum stake amount is updated.
+    /// @param oldAmount The previous minimum stake amount.
+    /// @param newAmount The new minimum stake amount.
+    /// @dev This is a governance-controlled parameter that can be adjusted by the owner.
+    ///      It sets the minimum amount required for users to stake or withdraw.
+    ///      This is useful to prevent dust transactions and ensure meaningful participation.
+    event MinStakeAmountUpdated(uint256 oldAmount, uint256 newAmount);
 
     /// @notice Emitted when `sender` stakes `amount` on behalf of `to`.
     /// @param sender The caller providing stake tokens.
     /// @param to The recipient whose balance increases.
     /// @param amount The amount staked.
     event Staked(address indexed sender, address indexed to, uint256 amount);
-
-    /// @notice Emitted when `sender` withdraws `amount` to `to`.
-    /// @param sender The user withdrawing their stake.
-    /// @param to Recipient of returned principal (typically `sender`).
-    /// @param amount The amount withdrawn.
-    event Withdrawn(address indexed sender, address indexed to, uint256 amount);
 
     /// @notice Emitted when `user` is paid `amount` of rewards to `to`.
     /// @param user The user whose rewards were claimed/reset.
@@ -131,10 +190,44 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param amount Amount rescued.
     event RescueTokens(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Emitted when a delayed withdrawal is requested.
+    /// @param user The address requesting withdrawal.
+    /// @param amount Amount removed from staking and placed into the pending queue.
+    /// @param unlockTimestamp Timestamp when withdrawal becomes claimable.
+    event WithdrawalRequested(address indexed user, uint256 amount, uint64 unlockTimestamp);
+
+    /// @notice Emitted when a pending withdrawal is completed and principal is transferred out.
+    /// @param user The address completing withdrawal.
+    /// @param amount The amount withdrawn.
+    event WithdrawalCompleted(address indexed user, uint256 amount);
+
+    /// @notice Emitted when a pending withdrawal is canceled and principal is re-staked.
+    /// @param user The address canceling withdrawal.
+    /// @param amount The amount returned to staking.
+    event WithdrawalCanceled(address indexed user, uint256 amount);
+
+    /// @notice Emitted when the withdrawal delay is updated.
+    /// @param oldDelay Previous delay (seconds).
+    /// @param newDelay New delay (seconds).
+    event WithdrawDelayUpdated(uint64 oldDelay, uint64 newDelay);
+
     // ====== Errors ======
+
+    /// @notice Thrown when emergency exits are disabled and a user tries to withdraw immediately.
+    error EmergencyExitDisabled();
 
     /// @notice Thrown when a provided amount is zero where a positive value is required.
     error AmountZero();
+
+    /// @notice Thrown when a requested delay exceeds the maximum allowed.
+    /// @param requested The requested delay in seconds.
+    /// @param max The maximum allowed delay in seconds.
+    error DelayTooLong(uint64 requested, uint64 max);
+
+    /// @notice Thrown when a provided amount is below the minimum required for staking/unstaking.
+    /// @param provided The amount provided by the user.
+    /// @param minRequired The minimum amount required to proceed.
+    error AmountTooLow(uint256 provided, uint256 minRequired);
 
     /// @notice Thrown when a user attempts to withdraw/claim more than available.
     error InsufficientBalance();
@@ -154,19 +247,37 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @notice Thrown when no pending reward rate exists to execute or cancel.
     error NoPendingRate();
 
+    /// @notice Thrown when a user already has an active pending withdrawal.
+    error PendingWithdrawalExists();
+
+    /// @notice Thrown when a user has no pending withdrawal to act upon.
+    error NoPendingWithdrawal();
+
+    /// @notice Thrown when attempting to complete a withdrawal before it's unlocked.
+    /// @param unlockTimestamp The timestamp when completion becomes allowed.
+    error WithdrawalNotUnlocked(uint64 unlockTimestamp);
+
     // ====== Governance params (constructor-initialized) ======
 
     /// @notice Maximum allowed emission rate (tokens/sec).
-    uint256 public MAX_REWARD_RATE;
+    uint256 public immutable MAX_REWARD_RATE;
+
+    /// @notice Maximum withdraw delay (in seconds).
+    /// @dev This is a governance-controlled parameter that can be adjusted by the owner.
+    ///      It sets the maximum delay for withdrawals, ensuring that users cannot set excessively long delays
+    uint32 public constant MAX_WITHDRAW_DELAY = 30 days;
 
     /// @notice Delay required between proposing and executing a reward rate change.
-    uint64 public RATE_CHANGE_DELAY;
+    uint64 public immutable RATE_CHANGE_DELAY;
 
     /// @notice Proposed reward rate pending execution after `rateChangeExecuteAfter`.
     uint256 public pendingRewardRate;
 
     /// @notice Earliest timestamp when the pending reward rate can be executed.
     uint64 public rateChangeExecuteAfter;
+
+    /// @notice Minimum amount required to stake/unstake
+    uint256 public minStakeAmount;
 
     // ====== Construction ======
 
@@ -177,6 +288,8 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param initialOwner Address to receive contract ownership.
     /// @param _maxRewardRate Governance max for `rewardRate` (tokens/sec).
     /// @param _rateChangeDelay Timelock delay for rate changes (in seconds).
+    /// @param _initialWithdrawDelay Initial locked withdrawal delay (in seconds).
+    /// @param _minStakeAmount Minimum amount required to stake or withdraw.
     /// @dev Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.
     constructor(
         IERC20 _stakeToken,
@@ -184,24 +297,34 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         uint256 _initialRewardRate,
         address initialOwner,
         uint256 _maxRewardRate,
-        uint64 _rateChangeDelay
+        uint64 _rateChangeDelay,
+        uint64 _initialWithdrawDelay,
+        uint256 _minStakeAmount
     ) Ownable(initialOwner) {
         if (address(_stakeToken) == address(0)) revert InvalidToken();
         if (address(_rewardToken) == address(0)) revert InvalidToken();
+        if (_initialWithdrawDelay > MAX_WITHDRAW_DELAY) revert DelayTooLong(_initialWithdrawDelay, MAX_WITHDRAW_DELAY);
 
         STAKE_TOKEN = _stakeToken;
         REWARD_TOKEN = _rewardToken;
-
         MAX_REWARD_RATE = _maxRewardRate;
         RATE_CHANGE_DELAY = _rateChangeDelay;
 
-        if (_initialRewardRate > MAX_REWARD_RATE) revert RewardRateTooHigh(_initialRewardRate, MAX_REWARD_RATE);
         rewardRate = _initialRewardRate;
-
+        withdrawDelay = _initialWithdrawDelay;
+        minStakeAmount = _minStakeAmount;
         lastUpdateTime = uint64(block.timestamp);
 
-        // Emit event for initial rate setting
-        emit RewardRateUpdated(0, _initialRewardRate);
+        emit Initialized(
+            address(_stakeToken),
+            address(_rewardToken),
+            _initialRewardRate,
+            initialOwner,
+            _maxRewardRate,
+            _rateChangeDelay,
+            _initialWithdrawDelay,
+            _minStakeAmount
+        );
     }
 
     // =========================
@@ -253,6 +376,15 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         return u.rewards + (u.balance * (rpt - u.userRewardPerTokenPaid)) / 1e18;
     }
 
+    /// @notice View the total rewards reserves runway in seconds.
+    /// @dev If `rewardRate == 0`, returns `type(uint256).max` (infinite runway).
+    ///      Otherwise, computes `rewardReserves / rewardRate`.
+    /// @return seconds The number of seconds the current reserves can sustain at the current rate.
+    function rewardsRunwaySeconds() external view returns (uint256) {
+        if (rewardRate == 0) return type(uint256).max;
+        return rewardReserves / rewardRate;
+    }
+
     // =========================
     //          Admin
     // =========================
@@ -270,7 +402,7 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         emit RewardRateProposed(_newRate, execAfter);
     }
 
-    /// @notice Execute a previously proposed reward rate after the timelock elapses.
+    /// @notice Execute a previously proposed reward rate after the timelock elapses. Intentionally callable by anyone.
     /// @dev Snapshots global accounting first, then updates `rewardRate` and emits `RewardRateUpdated`.
     function executeRewardRateChange() external {
         uint64 execAfter = rateChangeExecuteAfter;
@@ -333,6 +465,35 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         emit RescueTokens(address(token), to, amount);
     }
 
+    /// @notice Set the withdrawal delay (in seconds) for delayed withdrawals.
+    /// @dev Emits `WithdrawDelayUpdated`. Can be set to 0 to allow immediate completion after request.
+    /// @param newDelay The new delay duration in seconds.
+    function setWithdrawDelay(uint64 newDelay) external onlyOwner {
+        if (newDelay > MAX_WITHDRAW_DELAY) revert DelayTooLong(newDelay, MAX_WITHDRAW_DELAY);
+        uint64 old = withdrawDelay;
+        withdrawDelay = newDelay;
+        emit WithdrawDelayUpdated(old, newDelay);
+    }
+
+    /// @notice Enable/disable immediate emergency exits that forfeit rewards.
+    /// @dev Default should be false in production; only enable during incidents.
+    /// @param enabled True to enable emergency exits; false to disable.
+    function setEmergencyExitEnabled(bool enabled) external onlyOwner {
+        emergencyExitEnabled = enabled;
+        emit EmergencyExitEnabled(enabled);
+    }
+
+    // @notice Set the minimum stake amount required for staking or withdrawing.
+    /// @dev Emits `MinStakeAmountUpdated`. This is a governance-controlled parameter that can be adjusted by the owner.
+    ///      It sets the minimum amount required for users to stake or withdraw.
+    ///      This is useful to prevent dust transactions and ensure meaningful participation.
+    /// @param newMinStakeAmount The new minimum stake amount in tokens.
+    function setMinStakeAmount(uint256 newMinStakeAmount) external onlyOwner {
+        uint256 oldMinStakeAmount = minStakeAmount;
+        minStakeAmount = newMinStakeAmount;
+        emit MinStakeAmountUpdated(oldMinStakeAmount, newMinStakeAmount);
+    }
+
     // =========================
     //       User actions
     // =========================
@@ -353,6 +514,7 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param to Recipient whose stake balance increases.
     function stakeFor(uint256 amount, address to) public nonReentrant {
         if (amount == 0) revert AmountZero();
+        if (amount < minStakeAmount) revert AmountTooLow(amount, minStakeAmount);
 
         _updateUser(to);
 
@@ -362,24 +524,6 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         totalStaked += amount;
 
         emit Staked(msg.sender, to, amount);
-    }
-
-    /// @notice Withdraw `amount` of your staked principal.
-    /// @dev Updates global & user accounting first; accrued rewards remain unclaimed.
-    /// @param amount Amount to withdraw.
-    function withdraw(uint256 amount) external nonReentrant {
-        if (amount == 0) revert AmountZero();
-
-        _updateUser(msg.sender);
-
-        User storage u = users[msg.sender];
-        if (u.balance < amount) revert InsufficientBalance();
-
-        u.balance -= amount;
-        totalStaked -= amount;
-
-        STAKE_TOKEN.safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, msg.sender, amount);
     }
 
     /// @notice Claim your rewards to your own address.
@@ -409,27 +553,74 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         emit RewardPaid(msg.sender, to, reward);
     }
 
-    /// @notice Withdraw principal and claim rewards in one transaction.
-    /// @dev Updates accounting, then transfers principal and rewards if non-zero; emits events accordingly.
-    function exit() external nonReentrant {
+    /// @notice Initiate a delayed withdrawal request.
+    /// @dev
+    /// - Updates accounting, then **removes** `amount` from staking so it stops earning immediately.
+    /// - Records a single pending withdrawal that becomes claimable after `withdrawDelay`.
+    /// - Reverts if a pending withdrawal already exists for the caller.
+    /// @param amount Amount of staked tokens to request withdrawal for.
+    function requestWithdrawal(uint256 amount) external nonReentrant {
+        if (amount == 0) revert AmountZero();
+
         _updateUser(msg.sender);
 
         User storage u = users[msg.sender];
-        uint256 amount = u.balance;
-        uint256 reward = u.rewards;
+        if (u.balance < amount) revert InsufficientBalance();
 
-        u.balance = 0;
-        u.rewards = 0;
+        PendingWithdrawal storage p = pendingWithdrawals[msg.sender];
+        if (p.amount > 0) revert PendingWithdrawalExists();
+
+        // Remove principal from staking (stops rewards immediately)
+        u.balance -= amount;
         totalStaked -= amount;
 
-        if (amount > 0) {
-            STAKE_TOKEN.safeTransfer(msg.sender, amount);
-            emit Withdrawn(msg.sender, msg.sender, amount);
-        }
-        if (reward > 0) {
-            REWARD_TOKEN.safeTransfer(msg.sender, reward);
-            emit RewardPaid(msg.sender, msg.sender, reward);
-        }
+        uint64 unlockAt = uint64(block.timestamp) + withdrawDelay;
+        p.amount = amount;
+        p.unlockTimestamp = unlockAt;
+
+        emit WithdrawalRequested(msg.sender, amount, unlockAt);
+    }
+
+    /// @notice Complete a previously requested withdrawal after the delay.
+    /// @dev
+    /// - Does **not** modify rewards; rewards remain claimable separately at any time.
+    /// - Clears pending state before transfer to prevent reentrancy issues.
+    function completeWithdrawal() external nonReentrant {
+        PendingWithdrawal storage p = pendingWithdrawals[msg.sender];
+        uint256 amount = p.amount;
+        if (amount == 0) revert NoPendingWithdrawal();
+        uint64 unlockAt = p.unlockTimestamp;
+        if (block.timestamp < unlockAt) revert WithdrawalNotUnlocked(unlockAt);
+
+        // Clear pending state first (effects)
+        p.amount = 0;
+        p.unlockTimestamp = 0;
+
+        STAKE_TOKEN.safeTransfer(msg.sender, amount);
+
+        emit WithdrawalCompleted(msg.sender, amount);
+    }
+
+    /// @notice Cancel a pending withdrawal and re-stake the principal.
+    /// @dev
+    /// - Updates accounting first so the user **does not** backfill rewards for the pending period.
+    /// - Adds the pending amount back to `users[msg.sender].balance` and `totalStaked`.
+    function cancelWithdrawal() external nonReentrant {
+        PendingWithdrawal storage p = pendingWithdrawals[msg.sender];
+        uint256 amount = p.amount;
+        if (amount == 0) revert NoPendingWithdrawal();
+
+        _updateUser(msg.sender);
+
+        // return principal to staking
+        users[msg.sender].balance += amount;
+        totalStaked += amount;
+
+        // clear pending
+        p.amount = 0;
+        p.unlockTimestamp = 0;
+
+        emit WithdrawalCanceled(msg.sender, amount);
     }
 
     /// @notice Withdraw staked principal immediately, **forfeiting** any accrued rewards.
@@ -437,18 +628,23 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// - Calls `_updateGlobal()` (not `_updateUser`) to keep global math consistent.
     /// - Zeros user principal & rewards and snaps `userRewardPerTokenPaid` to the latest global index.
     function emergencyWithdraw() external nonReentrant {
+        if (!emergencyExitEnabled) revert EmergencyExitDisabled();
         _updateGlobal(); // keep global math consistent
 
         User storage u = users[msg.sender];
-        uint256 amount = u.balance;
+        PendingWithdrawal storage p = pendingWithdrawals[msg.sender];
+
+        uint256 amount = u.balance + p.amount; // Include pending
         if (amount == 0) revert InsufficientBalance();
+
+        totalStaked -= u.balance; // Only deduct actual staked amount
 
         // Forfeit rewards and reset state
         u.balance = 0;
         u.rewards = 0;
         u.userRewardPerTokenPaid = rewardPerTokenStored;
-
-        totalStaked -= amount;
+        p.amount = 0;
+        p.unlockTimestamp = 0;
 
         STAKE_TOKEN.safeTransfer(msg.sender, amount);
         emit EmergencyWithdraw(msg.sender, msg.sender, amount);

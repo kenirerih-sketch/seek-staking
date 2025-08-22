@@ -60,7 +60,7 @@ install:
 	forge install
 
 test:
-	forge test -vvv
+	forge test -vvvv
 
 coverage:
 	forge coverage
