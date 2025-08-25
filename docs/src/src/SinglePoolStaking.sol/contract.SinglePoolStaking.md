@@ -1,5 +1,5 @@
 # SinglePoolStaking
-[Git Source](https://github.com/TalismanSociety/seek-staking/blob/3e183f9a84b2fa7a0da367f2e3986f9f9e406b93/src/SinglePoolStaking.sol)
+[Git Source](https://github.com/TalismanSociety/seek-staking/blob/5127722128a2c621acd1ff1b33fab79798bcfc64/src/SinglePoolStaking.sol)
 
 **Inherits:**
 Ownable2Step, ReentrancyGuard
@@ -19,7 +19,7 @@ so reward payouts never consume staked principal.
 
 ## State Variables
 ### STAKE_TOKEN
-Token users deposit as principal (a.k.a. staked token).
+Token users deposit as principal (a.k.a. staked token). Standard ERC-20 (no fee/rebase).
 
 *Immutable at construction.*
 
@@ -30,7 +30,7 @@ IERC20 public immutable STAKE_TOKEN;
 
 
 ### REWARD_TOKEN
-Token paid out as rewards.
+Token paid out as rewards. Standard ERC-20 (no fee/rebase).
 
 *Immutable at construction; can be same as `STAKE_TOKEN`.*
 
@@ -85,6 +85,20 @@ uint256 public rewardReserves;
 ```
 
 
+### emergencyExitEnabled
+Flag to enable emergency exit mode.
+
+*When enabled, users can withdraw their principal immediately, forfeiting any accrued rewards.
+This is a governance-controlled feature that can be toggled by the owner.
+When disabled, users must use the delayed withdrawal path to claim their principal.
+This flag is set to `false` by default and can be toggled by the owner.*
+
+
+```solidity
+bool public emergencyExitEnabled;
+```
+
+
 ### totalStaked
 Total staked principal held by the contract.
 
@@ -103,12 +117,44 @@ mapping(address => User) public users;
 ```
 
 
+### withdrawDelay
+Lock duration between withdrawal request and claim (in seconds).
+
+*Configurable by owner. If set to 0, withdrawals can be completed immediately after requesting.*
+
+
+```solidity
+uint64 public withdrawDelay;
+```
+
+
+### pendingWithdrawals
+Mapping of user to their single active pending withdrawal (if any).
+
+
+```solidity
+mapping(address => PendingWithdrawal) public pendingWithdrawals;
+```
+
+
 ### MAX_REWARD_RATE
 Maximum allowed emission rate (tokens/sec).
 
 
 ```solidity
-uint256 public MAX_REWARD_RATE;
+uint256 public immutable MAX_REWARD_RATE;
+```
+
+
+### MAX_WITHDRAW_DELAY
+Maximum withdraw delay (in seconds).
+
+*This is a governance-controlled parameter that can be adjusted by the owner.
+It sets the maximum delay for withdrawals, ensuring that users cannot set excessively long delays*
+
+
+```solidity
+uint32 public constant MAX_WITHDRAW_DELAY = 30 days;
 ```
 
 
@@ -117,7 +163,7 @@ Delay required between proposing and executing a reward rate change.
 
 
 ```solidity
-uint64 public RATE_CHANGE_DELAY;
+uint64 public immutable RATE_CHANGE_DELAY;
 ```
 
 
@@ -139,6 +185,15 @@ uint64 public rateChangeExecuteAfter;
 ```
 
 
+### minStakeAmount
+Minimum amount required to stake/unstake
+
+
+```solidity
+uint256 public minStakeAmount;
+```
+
+
 ## Functions
 ### constructor
 
@@ -154,7 +209,9 @@ constructor(
     uint256 _initialRewardRate,
     address initialOwner,
     uint256 _maxRewardRate,
-    uint64 _rateChangeDelay
+    uint64 _rateChangeDelay,
+    uint64 _initialWithdrawDelay,
+    uint256 _minStakeAmount
 ) Ownable(initialOwner);
 ```
 **Parameters**
@@ -167,6 +224,8 @@ constructor(
 |`initialOwner`|`address`|Address to receive contract ownership.|
 |`_maxRewardRate`|`uint256`|Governance max for `rewardRate` (tokens/sec).|
 |`_rateChangeDelay`|`uint64`|Timelock delay for rate changes (in seconds).|
+|`_initialWithdrawDelay`|`uint64`|Initial locked withdrawal delay (in seconds).|
+|`_minStakeAmount`|`uint256`|Minimum amount required to stake or withdraw.|
 
 
 ### balanceOf
@@ -250,6 +309,24 @@ function earned(address account) public view returns (uint256 amount);
 |`amount`|`uint256`|The accrued but unclaimed rewards.|
 
 
+### rewardsRunwaySeconds
+
+View the total rewards reserves runway in seconds.
+
+*If `rewardRate == 0`, returns `type(uint256).max` (infinite runway).
+Otherwise, computes `rewardReserves / rewardRate`.*
+
+
+```solidity
+function rewardsRunwaySeconds() external view returns (uint256);
+```
+**Returns**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`<none>`|`uint256`|seconds The number of seconds the current reserves can sustain at the current rate.|
+
+
 ### proposeRewardRate
 
 Propose a new reward emission rate (tokens per second), subject to a delay.
@@ -269,7 +346,7 @@ function proposeRewardRate(uint256 _newRate) external onlyOwner;
 
 ### executeRewardRateChange
 
-Execute a previously proposed reward rate after the timelock elapses.
+Execute a previously proposed reward rate after the timelock elapses. Intentionally callable by anyone.
 
 *Snapshots global accounting first, then updates `rewardRate` and emits `RewardRateUpdated`.*
 
@@ -329,6 +406,57 @@ function rescueTokens(IERC20 token, address to, uint256 amount) external onlyOwn
 |`amount`|`uint256`|The amount to rescue.|
 
 
+### setWithdrawDelay
+
+Set the withdrawal delay (in seconds) for delayed withdrawals.
+
+*Emits `WithdrawDelayUpdated`. Can be set to 0 to allow immediate completion after request.*
+
+
+```solidity
+function setWithdrawDelay(uint64 newDelay) external onlyOwner;
+```
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`newDelay`|`uint64`|The new delay duration in seconds.|
+
+
+### setEmergencyExitEnabled
+
+Enable/disable immediate emergency exits that forfeit rewards.
+
+*Default should be false in production; only enable during incidents.*
+
+
+```solidity
+function setEmergencyExitEnabled(bool enabled) external onlyOwner;
+```
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`enabled`|`bool`|True to enable emergency exits; false to disable.|
+
+
+### setMinStakeAmount
+
+*Emits `MinStakeAmountUpdated`. This is a governance-controlled parameter that can be adjusted by the owner.
+It sets the minimum amount required for users to stake or withdraw.
+This is useful to prevent dust transactions and ensure meaningful participation.*
+
+
+```solidity
+function setMinStakeAmount(uint256 newMinStakeAmount) external onlyOwner;
+```
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`newMinStakeAmount`|`uint256`|The new minimum stake amount in tokens.|
+
+
 ### stake
 
 Stake `amount` for yourself.
@@ -366,23 +494,6 @@ function stakeFor(uint256 amount, address to) public nonReentrant;
 |`to`|`address`|Recipient whose stake balance increases.|
 
 
-### withdraw
-
-Withdraw `amount` of your staked principal.
-
-*Updates global & user accounting first; accrued rewards remain unclaimed.*
-
-
-```solidity
-function withdraw(uint256 amount) external nonReentrant;
-```
-**Parameters**
-
-|Name|Type|Description|
-|----|----|-----------|
-|`amount`|`uint256`|Amount to withdraw.|
-
-
 ### getReward
 
 Claim your rewards to your own address.
@@ -411,15 +522,50 @@ function getRewardTo(address to) external nonReentrant;
 |`to`|`address`|Recipient of the rewards.|
 
 
-### exit
+### requestWithdrawal
 
-Withdraw principal and claim rewards in one transaction.
+Initiate a delayed withdrawal request.
 
-*Updates accounting, then transfers principal and rewards if non-zero; emits events accordingly.*
+*
+- Updates accounting, then **removes** `amount` from staking so it stops earning immediately.
+- Records a single pending withdrawal that becomes claimable after `withdrawDelay`.
+- Reverts if a pending withdrawal already exists for the caller.*
 
 
 ```solidity
-function exit() external nonReentrant;
+function requestWithdrawal(uint256 amount) external nonReentrant;
+```
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`amount`|`uint256`|Amount of staked tokens to request withdrawal for.|
+
+
+### completeWithdrawal
+
+Complete a previously requested withdrawal after the delay.
+
+*
+- Does **not** modify rewards; rewards remain claimable separately at any time.
+- Clears pending state before transfer to prevent reentrancy issues.*
+
+
+```solidity
+function completeWithdrawal() external nonReentrant;
+```
+
+### cancelWithdrawal
+
+Cancel a pending withdrawal and re-stake the principal.
+
+*
+- Updates accounting first so the user **does not** backfill rewards for the pending period.
+- Adds the pending amount back to `users[msg.sender].balance` and `totalStaked`.*
+
+
+```solidity
+function cancelWithdrawal() external nonReentrant;
 ```
 
 ### emergencyWithdraw
@@ -473,6 +619,82 @@ function _updateUser(address account) internal;
 
 
 ## Events
+### Initialized
+Emitted when the contract is initialized with its parameters.
+
+*Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.
+Emits `RewardRateUpdated`, `WithdrawDelayUpdated`, and `MinStakeAmountUpdated` events.*
+
+*This event is emitted when the contract is initialized with its parameters.
+It provides a record of the initial configuration of the staking pool.
+This is useful for transparency and auditing purposes, allowing users to
+verify the initial setup of the staking contract.*
+
+*This event is emitted when the contract is initialized with its parameters.*
+
+
+```solidity
+event Initialized(
+    address indexed _stakeToken,
+    address indexed _rewardToken,
+    uint256 _initialRewardRate,
+    address indexed initialOwner,
+    uint256 _maxRewardRate,
+    uint64 _rateChangeDelay,
+    uint64 _initialWithdrawDelay,
+    uint256 _minStakeAmount
+);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`_stakeToken`|`address`|The token users deposit as principal.|
+|`_rewardToken`|`address`|The token used for rewards (may equal `_stakeToken`).|
+|`_initialRewardRate`|`uint256`|Initial `rewardRate` in tokens per second.|
+|`initialOwner`|`address`|Address to receive contract ownership.|
+|`_maxRewardRate`|`uint256`|Governance max for `rewardRate` (tokens/sec).|
+|`_rateChangeDelay`|`uint64`|Timelock delay for rate changes (in seconds).|
+|`_initialWithdrawDelay`|`uint64`|Initial locked withdrawal delay (in seconds).|
+|`_minStakeAmount`|`uint256`|Minimum amount required to stake.|
+
+### EmergencyExitEnabled
+Emitted when emergency exit mode is enabled/disabled.
+
+*When enabled, users can withdraw their principal immediately, forfeiting any accrued rewards.
+When disabled, users must use the delayed withdrawal path to claim their principal.*
+
+
+```solidity
+event EmergencyExitEnabled(bool enabled);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`enabled`|`bool`|True if emergency exits are enabled; false if disabled.|
+
+### MinStakeAmountUpdated
+Emitted when the minimum stake amount is updated.
+
+*This is a governance-controlled parameter that can be adjusted by the owner.
+It sets the minimum amount required for users to stake or withdraw.
+This is useful to prevent dust transactions and ensure meaningful participation.*
+
+
+```solidity
+event MinStakeAmountUpdated(uint256 oldAmount, uint256 newAmount);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`oldAmount`|`uint256`|The previous minimum stake amount.|
+|`newAmount`|`uint256`|The new minimum stake amount.|
+
 ### Staked
 Emitted when `sender` stakes `amount` on behalf of `to`.
 
@@ -488,22 +710,6 @@ event Staked(address indexed sender, address indexed to, uint256 amount);
 |`sender`|`address`|The caller providing stake tokens.|
 |`to`|`address`|The recipient whose balance increases.|
 |`amount`|`uint256`|The amount staked.|
-
-### Withdrawn
-Emitted when `sender` withdraws `amount` to `to`.
-
-
-```solidity
-event Withdrawn(address indexed sender, address indexed to, uint256 amount);
-```
-
-**Parameters**
-
-|Name|Type|Description|
-|----|----|-----------|
-|`sender`|`address`|The user withdrawing their stake.|
-|`to`|`address`|Recipient of returned principal (typically `sender`).|
-|`amount`|`uint256`|The amount withdrawn.|
 
 ### RewardPaid
 Emitted when `user` is paid `amount` of rewards to `to`.
@@ -613,7 +819,76 @@ event RescueTokens(address indexed token, address indexed to, uint256 amount);
 |`to`|`address`|Recipient of rescued tokens.|
 |`amount`|`uint256`|Amount rescued.|
 
+### WithdrawalRequested
+Emitted when a delayed withdrawal is requested.
+
+
+```solidity
+event WithdrawalRequested(address indexed user, uint256 amount, uint64 unlockTimestamp);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`user`|`address`|The address requesting withdrawal.|
+|`amount`|`uint256`|Amount removed from staking and placed into the pending queue.|
+|`unlockTimestamp`|`uint64`|Timestamp when withdrawal becomes claimable.|
+
+### WithdrawalCompleted
+Emitted when a pending withdrawal is completed and principal is transferred out.
+
+
+```solidity
+event WithdrawalCompleted(address indexed user, uint256 amount);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`user`|`address`|The address completing withdrawal.|
+|`amount`|`uint256`|The amount withdrawn.|
+
+### WithdrawalCanceled
+Emitted when a pending withdrawal is canceled and principal is re-staked.
+
+
+```solidity
+event WithdrawalCanceled(address indexed user, uint256 amount);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`user`|`address`|The address canceling withdrawal.|
+|`amount`|`uint256`|The amount returned to staking.|
+
+### WithdrawDelayUpdated
+Emitted when the withdrawal delay is updated.
+
+
+```solidity
+event WithdrawDelayUpdated(uint64 oldDelay, uint64 newDelay);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`oldDelay`|`uint64`|Previous delay (seconds).|
+|`newDelay`|`uint64`|New delay (seconds).|
+
 ## Errors
+### EmergencyExitDisabled
+Thrown when emergency exits are disabled and a user tries to withdraw immediately.
+
+
+```solidity
+error EmergencyExitDisabled();
+```
+
 ### AmountZero
 Thrown when a provided amount is zero where a positive value is required.
 
@@ -621,6 +896,36 @@ Thrown when a provided amount is zero where a positive value is required.
 ```solidity
 error AmountZero();
 ```
+
+### DelayTooLong
+Thrown when a requested delay exceeds the maximum allowed.
+
+
+```solidity
+error DelayTooLong(uint64 requested, uint64 max);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`requested`|`uint64`|The requested delay in seconds.|
+|`max`|`uint64`|The maximum allowed delay in seconds.|
+
+### AmountTooLow
+Thrown when a provided amount is below the minimum required for staking/unstaking.
+
+
+```solidity
+error AmountTooLow(uint256 provided, uint256 minRequired);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`provided`|`uint256`|The amount provided by the user.|
+|`minRequired`|`uint256`|The minimum amount required to proceed.|
 
 ### InsufficientBalance
 Thrown when a user attempts to withdraw/claim more than available.
@@ -675,6 +980,36 @@ Thrown when no pending reward rate exists to execute or cancel.
 error NoPendingRate();
 ```
 
+### PendingWithdrawalExists
+Thrown when a user already has an active pending withdrawal.
+
+
+```solidity
+error PendingWithdrawalExists();
+```
+
+### NoPendingWithdrawal
+Thrown when a user has no pending withdrawal to act upon.
+
+
+```solidity
+error NoPendingWithdrawal();
+```
+
+### WithdrawalNotUnlocked
+Thrown when attempting to complete a withdrawal before it's unlocked.
+
+
+```solidity
+error WithdrawalNotUnlocked(uint64 unlockTimestamp);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`unlockTimestamp`|`uint64`|The timestamp when completion becomes allowed.|
+
 ## Structs
 ### User
 Per-user accounting data.
@@ -695,4 +1030,22 @@ struct User {
 |`balance`|`uint256`|Current staked principal.|
 |`userRewardPerTokenPaid`|`uint256`|User snapshot of `rewardPerTokenStored` at last accounting.|
 |`rewards`|`uint256`|Accrued but unclaimed rewards (accounted via snapshots).|
+
+### PendingWithdrawal
+User withdrawal request data.
+
+
+```solidity
+struct PendingWithdrawal {
+    uint256 amount;
+    uint64 unlockTimestamp;
+}
+```
+
+**Properties**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`amount`|`uint256`|Requested amount that was removed from staking and no longer earns rewards.|
+|`unlockTimestamp`|`uint64`|When the withdrawal can be completed.|
 
