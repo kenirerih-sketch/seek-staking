@@ -6,7 +6,8 @@ import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
 
 /// @title SinglePoolStaking — Fuzz Tests
 /// @notice Property-based tests to exercise proportional accrual, reserves consumption, and rate snapshots.
-/// @dev Updated to comply with timelocked, capped reward-rate changes (propose/execute pattern).
+/// @dev Updated to comply with timelocked, capped reward-rate changes (propose/execute pattern)
+///      and the new constructor signature (withdrawDelay, minStakeAmount).
 contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
     /// @notice Proportional accrual: for two stakers with arbitrary (bounded) sizes, accrual splits by stake share.
     /// @dev We keep `dt` small enough so `newly = dt*rate` doesn’t hit the reserve cap.
@@ -21,7 +22,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
         _stake(bob, bAmt);
 
         // Ensure reserves are ample (Base already added 100_000 ether; this is extra safety)
-        staking.fundRewards(1 ether); // tiny top-up; optional
+        staking.fundRewards(1 ether); // small top-up
 
         // Warp and check
         vm.warp(block.timestamp + dt);
@@ -66,8 +67,17 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
 
         // Case 2: no stakers -> reserves do not change on a global update (via propose/execute)
         {
-            // Fresh instance with reserves and no stakes (delay = 1, max = 1e18 to mirror Base)
-            SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner, 1e18, 1);
+            // Fresh instance with reserves and no stakes (delay = 1, max = 1e18, withdrawDelay=1, minStake=0)
+            SinglePoolStaking s = new SinglePoolStaking(
+                stakeToken,
+                stakeToken,
+                1e18,
+                address(this),
+                1e18,
+                1, // RATE_CHANGE_DELAY
+                1, // withdrawDelay
+                0 // minStakeAmount
+            );
             stakeToken.approve(address(s), type(uint256).max);
             s.fundRewards(10_000 ether);
 
@@ -75,7 +85,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
 
             // Propose same rate and execute after delay to force a global update
             s.proposeRewardRate(1e18);
-            vm.warp(block.timestamp + 1);
+            vm.warp(block.timestamp + s.RATE_CHANGE_DELAY());
             s.executeRewardRateChange();
 
             assertEq(s.rewardReserves(), beforeRes2, "reserves changed with no stakers");
@@ -87,7 +97,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
     function testFuzz_SetRewardRate_Snapshot(uint64 t1, uint64 t2, uint96 stakeAmt, uint128 r2) public {
         // Bounds
         stakeAmt = uint96(bound(stakeAmt, 1 ether, 9_000 ether));
-        t1 = uint64(bound(t1, 1, 1_000)); // must be >= 1 so we can spend 1s on the delay
+        t1 = uint64(bound(t1, 1, 1_000)); // >= 1 so we can spend 1s on the delay
         t2 = uint64(bound(t2, 0, 1_000)); // allow zero-length second window
 
         // Cap r2 by configured MAX_REWARD_RATE() to avoid revert
@@ -96,13 +106,13 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
 
         _stake(alice, stakeAmt);
 
-        // Window 1 at default rate = 1e18. We warp t1-1, then spend +1s for the timelocked execute,
+        // Window 1 at default rate = 1e18. We warp t1-1, then spend +delay seconds to execute,
         // so total old-rate time is exactly t1 and the expected math remains unchanged.
         vm.warp(block.timestamp + (t1 - 1));
 
-        // Propose new rate (owner-only) and wait for delay (Base uses delay=1)
+        // Propose new rate (owner-only) and wait for delay
         staking.proposeRewardRate(uint256(r2));
-        vm.warp(block.timestamp + 1); // execute-after delay
+        vm.warp(block.timestamp + staking.RATE_CHANGE_DELAY()); // execute-after delay
 
         // Execute switch to r2
         staking.executeRewardRateChange();
@@ -134,5 +144,38 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
         // Sanity: never overpay the ideal (no rounding)
         uint256 ideal = newly1 + newly2;
         assertLe(paid, ideal, "paid exceeds idealized accrual");
+    }
+
+    /// @notice Delayed withdrawal fuzz: requesting reduces stake immediately; completion doesn't change rewards in-block.
+    /// @dev We fuzz stake size, request size, pre-request accrual window, and ensure same-block completion is neutral.
+    function testFuzz_RequestWithdrawalAndComplete(uint96 stakeAmt, uint96 reqAmt, uint64 tBefore) public {
+        // Bounds
+        stakeAmt = uint96(bound(stakeAmt, 1 ether, 9_000 ether));
+        reqAmt = uint96(bound(reqAmt, 1, stakeAmt));
+        tBefore = uint64(bound(tBefore, 0, 300)); // accrue a bit before request
+
+        // Stake and accrue some time first
+        _stake(alice, stakeAmt);
+        if (tBefore > 0) vm.warp(block.timestamp + tBefore);
+
+        // Request withdrawal (removes from staking immediately)
+        vm.prank(alice);
+        staking.requestWithdrawal(reqAmt);
+
+        assertEq(staking.balanceOf(alice), uint256(stakeAmt) - uint256(reqAmt), "stake not reduced on request");
+
+        // Warp until unlock
+        vm.warp(block.timestamp + staking.withdrawDelay());
+
+        uint256 earnedBeforeComplete = staking.earned(alice);
+        uint256 balBefore = stakeToken.balanceOf(alice);
+
+        // Complete withdrawal — should only transfer principal; rewards unchanged in the same block
+        vm.prank(alice);
+        staking.completeWithdrawal();
+
+        uint256 balAfter = stakeToken.balanceOf(alice);
+        assertEq(balAfter - balBefore, uint256(reqAmt), "principal not transferred on completion");
+        assertEq(staking.earned(alice), earnedBeforeComplete, "completion changed rewards unexpectedly");
     }
 }
