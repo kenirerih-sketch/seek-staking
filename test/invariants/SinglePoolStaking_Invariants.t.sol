@@ -15,6 +15,7 @@ import {Handler} from "./Handler.sol";
 ///        - user.userRewardPerTokenPaid ≤ rewardPerTokenStored for all tracked actors
 ///        - Sum of users' balances equals totalStaked (for tracked actor set)
 ///        - rewardReserves never underflows (basic sanity)
+///      Updated to the delayed-withdrawal model; Handler should only use tracked actors.
 contract SinglePoolStaking_Invariants is StdInvariant, Test {
     /// @notice Staking contract under test.
     SinglePoolStaking s;
@@ -41,7 +42,19 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
         address owner = address(this);
 
         t = new ERC20Token("Stake", "STK", 10_000_000 ether, owner);
-        s = new SinglePoolStaking(t, t, 1e18, owner, 1e18, 1);
+
+        // New constructor signature:
+        // (stakeToken, rewardToken, initialRate, owner, maxRate, rateChangeDelay, withdrawDelay, minStakeAmount)
+        s = new SinglePoolStaking(
+            t, // STAKE_TOKEN
+            t, // REWARD_TOKEN
+            1e18, // initial reward rate (1 token/sec)
+            owner, // owner
+            1e18, // MAX_REWARD_RATE
+            1, // RATE_CHANGE_DELAY (1s for tests)
+            1, // withdrawDelay (1s for tests)
+            0 // minStakeAmount
+        );
 
         // Allocate and seed actors
         actors = new address[](ACTOR_COUNT);
@@ -50,9 +63,6 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
             actors[i] = address(uint160(uint256(keccak256(abi.encode("actor", i)))));
             bool success = t.transfer(actors[i], 100_000 ether);
             require(success, "Token transfer failed");
-            // NOTE: Approvals for staking are not strictly required here because the
-            //       handler's actions may rely on `vm.prank` and prior approvals set
-            //       in other setup flows. Add per-actor approvals if your handler stakes immediately.
         }
 
         // Prefund reserves (owner)
@@ -61,6 +71,8 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
 
         // Create handler and wire invariants
         h = new Handler(s, t, actors);
+
+        // Fuzz target = Handler (all calls during invariants go through it)
         targetContract(address(h));
     }
 
@@ -85,6 +97,7 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
 
     /// @notice Invariant: Sum of tracked users’ balances equals `totalStaked`.
     /// @dev Ensures internal accounting of principal aligns with aggregate total for our tracked cohort.
+    ///      Assumes only tracked actors stake via the Handler.
     function invariant_TotalStakedEqualsSum() public view {
         uint256 sum;
         for (uint256 i = 0; i < actors.length; i++) {
@@ -115,7 +128,6 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
 
     /// @notice Invariant: Contract token balance always covers principal (staked tokens).
     /// @dev With stake==reward token, principal (totalStaked) is held by the contract at all times.
-    ///      Withdraw/exit return principal; fund/claim adjust only non-principal.
     function invariant_ContractBalanceCoversPrincipal() public view {
         uint256 bal = t.balanceOf(address(s));
         assertGe(bal, s.totalStaked());

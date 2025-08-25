@@ -46,14 +46,12 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `fundRewards` reverts when amount is zero.
-    /// @dev Covers explicit `AmountZero` revert branch.
     function testFundRewards_RevertOnZero() public {
         vm.expectRevert(SinglePoolStaking.AmountZero.selector);
         staking.fundRewards(0);
     }
 
     /// @notice Only the owner can call `fundRewards`.
-    /// @dev Covers `OwnableUnauthorizedAccount` revert.
     function testFundRewards_OnlyOwner() public {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
@@ -61,7 +59,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Funding uses balance-delta; unrelated stake balance changes should not affect reserves.
-    /// @dev Stakes increase contract balance but should not be counted as reserves (assert deltas against fund amount).
     function testFundRewards_UsesBalanceDelta() public {
         _stake(alice, 1_000 ether);
 
@@ -75,10 +72,11 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Defensive branch: `fundRewards` reverts when no tokens are actually received.
-    /// @dev Uses a token that returns `true` on `transferFrom` but does not change balances, making `received == 0`.
     function testFundRewards_RevertWhenReceivedZero() public {
         WeirdRewardToken weird = new WeirdRewardToken("WRD", "WRD", 1_000_000 ether);
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 1);
+        // reward token is weird; withdraw delay and min stake are trivial for tests
+        SinglePoolStaking s =
+            new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 1, 1, 0);
 
         weird.approve(address(s), type(uint256).max);
         weird.setNoMove(true);
@@ -89,11 +87,10 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice Snapshot across rate change using propose/execute; assert by claiming (mutative), not via pure view.
     /// @dev Window1: [0,10) @1e18 → 10 tokens; Window2: [10,20) @2e18 → 20 tokens. Total paid on claim = 30 tokens.
-    ///      Uses 1s delay set in BaseSinglePoolStaking to minimize test warp noise.
     function testProposeRewardRate_Snapshot_ClaimBased() public {
         _stake(alice, 100 ether);
 
-        // t in [0,10): old rate 1e18 => 10 tokens (includes +1 delay for propose to be executed)
+        // t in [0,10): old rate 1e18 => ~10 tokens
         vm.warp(block.timestamp + 9);
 
         // Propose new rate (owner-only)
@@ -108,11 +105,11 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         emit RewardRateUpdated(1e18, 2e18);
         staking.executeRewardRateChange();
 
-        // t in [10+1, 20+1): effectively another 10s @2e18
+        // t in next 10s @2e18
         vm.warp(block.timestamp + 10);
 
         uint256 before = stakeToken.balanceOf(alice);
-        _getReward(alice); // triggers _updateGlobal and pays
+        _getReward(alice); // triggers update and pays
         uint256 paid = stakeToken.balanceOf(alice) - before;
 
         assertEq(paid, 30 ether, "snapshot (10) + new rate window (20) != 30");
@@ -120,38 +117,126 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `stake` reverts on zero amount.
-    /// @dev Covers explicit `AmountZero` revert branch.
     function testStake_RevertOnZero() public {
         vm.expectRevert(SinglePoolStaking.AmountZero.selector);
         staking.stake(0);
     }
 
-    /// @notice Basic stake→accrue→withdraw flow; verifies rounding via contract’s integer math.
-    /// @dev RPT = floor((newly * 1e18) / totalBefore). Expected earned = floor(300 * RPT / 1e18).
-    function testStakeAndWithdraw() public {
+    /// @notice Stake → accrue → request withdrawal → complete after delay; verifies accrual math & events.
+    /// @dev Earned is snapshotted at request time; completing withdrawal does not affect rewards.
+    function testStake_RequestAndCompleteWithdrawal() public {
         _stake(alice, 300 ether);
         vm.warp(block.timestamp + 5);
 
-        vm.expectEmit(true, true, false, true);
-        emit Withdrawn(alice, alice, 100 ether);
-        _withdraw(alice, 100 ether);
+        uint64 delay = staking.withdrawDelay();
 
-        assertEq(staking.balanceOf(alice), 200 ether, "post-withdraw balance mismatch");
-        assertEq(staking.totalStaked(), 200 ether, "post-withdraw totalStaked mismatch");
+        // Expect request
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalRequested(alice, 100 ether, uint64(block.timestamp) + delay);
+        vm.prank(alice);
+        staking.requestWithdrawal(100 ether);
 
-        // Compute expected earned using the same integer math as the contract
-        uint256 elapsed = 5;
-        uint256 newly = elapsed * 1 ether; // 5 ether
-        uint256 totalBefore = 300 ether; // totalStaked before withdraw
-        uint256 deltaRpt = (newly * 1e18) / totalBefore; // floor division
-        uint256 expectedEarned = (300 ether * deltaRpt) / 1e18;
+        // After request: 200 staked
+        assertEq(staking.balanceOf(alice), 200 ether, "post-request stake mismatch");
+        assertEq(staking.totalStaked(), 200 ether, "post-request totalStaked mismatch");
 
-        uint256 earned = staking.earned(alice);
-        assertEq(earned, expectedEarned, "accrued but unclaimed mismatch");
+        // Earned for the first 5s with totalStaked = 300
+        uint256 elapsed1 = 5;
+        uint256 newly1 = elapsed1 * 1 ether; // rate = 1e18
+        uint256 totalBefore = 300 ether;
+        uint256 deltaRpt1 = (newly1 * 1e18) / totalBefore; // floor
+        uint256 expectedEarned1 = (300 ether * deltaRpt1) / 1e18;
+
+        // Additional accrual during the delay on remaining 200 with totalStaked = 200
+        uint256 totalAfter = 200 ether;
+        uint256 remaining = 200 ether;
+        uint256 newly2 = uint256(delay) * 1 ether;
+        uint256 deltaRpt2 = (newly2 * 1e18) / totalAfter; // floor
+        uint256 expectedEarnedAfter = expectedEarned1 + (remaining * deltaRpt2) / 1e18;
+
+        // Warp delay
+        vm.warp(block.timestamp + delay);
+
+        // (Optional) Assert completion does not change earned within the same block
+        uint256 beforeComplete = staking.earned(alice);
+
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalCompleted(alice, 100 ether);
+        vm.prank(alice);
+        staking.completeWithdrawal();
+
+        assertEq(staking.balanceOf(alice), 200 ether, "post-complete stake mismatch");
+        assertEq(staking.earned(alice), expectedEarnedAfter, "earned after completion mismatch");
+        assertEq(staking.earned(alice), beforeComplete, "completion should not change earned");
+    }
+
+    /// @notice `requestWithdrawal` reverts on zero amount and on insufficient balance.
+    function testRequestWithdrawal_RevertOnZero() public {
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.AmountZero.selector);
+        staking.requestWithdrawal(0);
+    }
+
+    function testRequestWithdrawal_RevertOnInsufficient() public {
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.InsufficientBalance.selector);
+        staking.requestWithdrawal(1);
+    }
+
+    /// @notice `completeWithdrawal` reverts when called before unlock or when no pending exists.
+    function testCompleteWithdrawal_RevertBeforeUnlockAndNoPending() public {
+        _stake(alice, 10 ether);
+        vm.prank(alice);
+        staking.requestWithdrawal(5 ether);
+
+        // Before unlock
+        vm.prank(alice);
+        vm.expectRevert(); // WithdrawalNotUnlocked
+        staking.completeWithdrawal();
+
+        // Let it unlock and complete once
+        vm.warp(block.timestamp + staking.withdrawDelay());
+        vm.prank(alice);
+        staking.completeWithdrawal();
+
+        // No pending now
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.NoPendingWithdrawal.selector);
+        staking.completeWithdrawal();
+    }
+
+    /// @notice `cancelWithdrawal` returns pending to staking; rewards do not backfill for pending period.
+    function testCancelWithdrawal_ReStakeAndAccrualBehavior() public {
+        _stake(alice, 100 ether);
+        vm.warp(block.timestamp + 3);
+
+        vm.prank(alice);
+        staking.requestWithdrawal(60 ether); // 40 remains staked
+
+        // accrue more time; pending does NOT earn
+        vm.warp(block.timestamp + 5);
+        uint256 earnedWith40 = staking.earned(alice);
+
+        // cancel returns 60 to stake; accrual resumes on full 100 after this point
+        vm.prank(alice);
+        staking.cancelWithdrawal();
+
+        assertEq(staking.balanceOf(alice), 100 ether, "principal not restored on cancel");
+
+        // accrue more & compare delta (post-cancel accrues on 100)
+        vm.warp(block.timestamp + 10);
+        uint256 earnedAfter = staking.earned(alice);
+        assertGt(earnedAfter - earnedWith40, 10 ether - 1, "post-cancel accrual too small"); // rough sanity
+    }
+
+    /// @notice cancelWithdrawal should revert when user has no pending withdrawal.
+    function testCancelWithdrawal_Revert_NoPending() public {
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.NoPendingWithdrawal.selector);
+        staking.cancelWithdrawal();
     }
 
     /// @notice `getRewardTo` sends rewards to a custom recipient; user’s accrued is zeroed.
-    /// @dev Validates recipient balance increase and user reward reset.
     function testGetRewardTo_SendsToRecipient() public {
         _stake(alice, 100 ether);
         vm.warp(block.timestamp + 7);
@@ -165,9 +250,32 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.earned(alice), 0, "user rewards not zeroed");
     }
 
-    /// @notice `emergencyWithdraw` forfeits rewards and returns principal immediately.
-    /// @dev Ensures rewards are zeroed, stake balance reset, and event emitted.
+    /// @notice getRewardTo: explicit coverage of both branches: zero-owed revert and success.
+    /// @dev Some solc/coverage combos mark one branch as uncovered unless both are exercised in isolation here.
+    function testGetRewardTo_Branches_RevertAndSuccess() public {
+        // Zero-owed -> revert
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.InsufficientBalance.selector);
+        staking.getRewardTo(bob);
+
+        // Earn something then succeed path
+        _stake(alice, 42 ether);
+        vm.warp(block.timestamp + 3);
+        uint256 owed = staking.earned(alice);
+
+        vm.expectEmit(true, true, false, true);
+        emit RewardPaid(alice, bob, owed);
+        vm.prank(alice);
+        staking.getRewardTo(bob);
+
+        assertEq(staking.earned(alice), 0, "owed not zeroed after getRewardTo");
+    }
+
+    /// @notice `emergencyWithdraw` forfeits rewards and returns principal immediately (when enabled).
     function testEmergencyWithdraw_ForfeitsRewards() public {
+        // enable emergency exit first
+        staking.setEmergencyExitEnabled(true);
+
         _stake(alice, 200 ether);
         vm.warp(block.timestamp + 9);
 
@@ -183,7 +291,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Cannot rescue the stake/reward token; can rescue unrelated tokens.
-    /// @dev Covers invalid-token branches and a successful rescue with event assertion.
     function testRescueTokens_InvalidAndValid() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
         staking.rescueTokens(stakeToken, address(this), 1 ether);
@@ -200,28 +307,40 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Constructor: zero-address guard for stake token.
-    /// @dev Covers `InvalidToken` branch.
     function testConstructor_RevertOnZeroStakeToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 1);
+        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for reward token.
-    /// @dev Covers `InvalidToken` branch.
     function testConstructor_RevertOnZeroRewardToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1);
+        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for contract owner.
-    /// @dev Covers `OwnerInvalidOwner` branch.
     function testConstructor_RevertOnZeroOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 1);
+        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 1, 1, 0);
+    }
+
+    /// @notice Constructor: initial withdraw delay > MAX_WITHDRAW_DELAY must revert.
+    function testConstructor_Revert_OnInitialWithdrawDelayTooLong() public {
+        uint64 tooLong = uint64(30 days) + 1; // keep in sync with constant
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.DelayTooLong.selector, tooLong, 30 days));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // initial rate
+            address(this), // owner
+            1e18, // max rate
+            1, // rate change delay
+            tooLong, // initial withdraw delay (too large)
+            0 // min stake
+        );
     }
 
     /// @notice `balanceOf` reflects user stake balance.
-    /// @dev Mirrors internal users mapping state via public view.
     function testView_balanceOf() public {
         assertEq(staking.balanceOf(alice), 0, "initial balance non-zero");
         _stake(alice, 200 ether);
@@ -229,7 +348,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `lastTimeRewardApplicable` equals `block.timestamp`.
-    /// @dev Confirms design choice (no period end cap).
     function testView_lastTimeRewardApplicable() public {
         uint256 now1 = staking.lastTimeRewardApplicable();
         assertEq(now1, block.timestamp, "initial lastTime mismatch");
@@ -239,7 +357,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `rewardPerToken` short-circuits when (a) no stakers or (b) elapsed == 0.
-    /// @dev Exercises both early-return branches in the view path.
     function testView_rewardPerToken_NoStakers_ElapsedZero() public {
         uint256 rpt0 = staking.rewardPerToken();
         assertEq(rpt0, staking.rewardPerTokenStored(), "no-stakers RPT changed unexpectedly");
@@ -251,9 +368,8 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `rewardPerToken` is capped by `rewardReserves` in the view path.
-    /// @dev Uses a fresh instance with tiny reserves; asserts RPT == (reserves * 1e18) / totalStaked.
     function testView_rewardPerToken_CapsByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(10 ether);
 
@@ -272,7 +388,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `earned()` accrues linearly for a single staker (view path).
-    /// @dev Baseline check at 1 token/second.
     function testView_earned_Simple() public {
         _stake(alice, 100 ether);
         vm.warp(block.timestamp + 10);
@@ -280,7 +395,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Reserves are consumed only on state updates that call `_updateGlobal()`.
-    /// @dev View reads do not reduce reserves; claiming does. Asserts 10 tokens are consumed on claim.
     function testFundRewards_ReservesConsumedByAccrual() public {
         _stake(alice, 100 ether);
         staking.fundRewards(1_000 ether);
@@ -295,7 +409,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Only the owner can propose a new reward rate; execution is permissionless after delay (safer UX).
-    /// @dev Covers owner-gate on propose; shows that a non-owner can execute after delay if desired.
     function testProposeRewardRate_OnlyOwner() public {
         // Non-owner proposing reverts
         vm.prank(alice);
@@ -308,7 +421,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         emit RewardRateProposed(2e18, executeAfter);
         staking.proposeRewardRate(2e18);
 
-        // Anyone can execute after delay (permissionless execution pattern)
+        // Anyone can execute after delay
         vm.warp(block.timestamp + 1);
         vm.prank(alice);
         vm.expectEmit(false, false, false, true);
@@ -319,9 +432,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Propose does not affect `lastUpdateTime`; execute updates it once (no drift within same block).
-    /// @dev With a 1s delay: propose (no change), warp+execute (updates to now), then propose again (no change).
     function testProposeRewardRate_IdempotentSameBlockUpdateTime() public {
-        // Propose new rate: should NOT touch lastUpdateTime
         uint64 before = staking.lastUpdateTime();
         uint64 executeAfter = uint64(block.timestamp + 1);
         vm.expectEmit(false, false, false, true);
@@ -330,13 +441,11 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         uint64 mid1 = staking.lastUpdateTime();
         assertEq(mid1, before, "propose should not change lastUpdateTime");
 
-        // Execute after delay: should set lastUpdateTime to current block
         vm.warp(block.timestamp + 1);
         staking.executeRewardRateChange();
         uint64 mid2 = staking.lastUpdateTime();
         assertLe(before, mid2, "lastUpdateTime should advance on execute");
 
-        // Propose again in same block: no change to lastUpdateTime
         vm.expectEmit(false, false, false, true);
         emit RewardRateProposed(3e18, uint64(block.timestamp + 1));
         staking.proposeRewardRate(3e18);
@@ -345,16 +454,14 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Cannot rescue the reward token when stake != reward (distinct invalid branch).
-    /// @dev Deploys a fresh instance with a different reward token and asserts `InvalidToken`.
     function testRescueTokens_InvalidForRewardToken_WhenDifferentTokens() public {
         ERC20Token reward2 = new ERC20Token("R", "R", 1_000_000 ether, address(this));
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 1);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 1, 1, 0);
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
         s.rescueTokens(reward2, address(this), 1 ether);
     }
 
     /// @notice `stakeFor` accrues existing rewards, adds to recipient balance, and emits `Staked`.
-    /// @dev Pre-accrual (10 tokens) must remain owed; principal increases to 300.
     function testStakeFor_Success_EventAndAccounting() public {
         _stake(alice, 100 ether);
         vm.warp(block.timestamp + 10);
@@ -374,23 +481,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.totalStaked(), 300 ether, "totalStaked mismatch");
     }
 
-    /// @notice `withdraw` reverts on zero amount.
-    /// @dev Covers `AmountZero` branch.
-    function testWithdraw_RevertOnZero() public {
-        vm.expectRevert(SinglePoolStaking.AmountZero.selector);
-        staking.withdraw(0);
-    }
-
-    /// @notice `withdraw` reverts when user has insufficient balance.
-    /// @dev Covers `InsufficientBalance` branch.
-    function testWithdraw_RevertOnInsufficient() public {
-        vm.prank(alice);
-        vm.expectRevert(SinglePoolStaking.InsufficientBalance.selector);
-        staking.withdraw(1);
-    }
-
     /// @notice `getReward` reverts when user has no rewards.
-    /// @dev Immediate claim after stake (same block) should revert.
     function testGetReward_RevertWhenZero() public {
         _stake(alice, 100 ether);
         vm.prank(alice);
@@ -399,7 +490,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice `getReward` transfers to sender, emits `RewardPaid`, and zeroes owed amount.
-    /// @dev Also checks user balance increment equals the owed amount.
     function testGetReward_Success_EventAndBalance() public {
         _stake(alice, 100 ether);
         vm.warp(block.timestamp + 7);
@@ -416,53 +506,43 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.earned(alice), 0, "owed not zeroed");
     }
 
-    /// @notice `getRewardTo` reverts when user has no rewards.
-    /// @dev Covers revert path for zero-owed `getRewardTo`.
-    function testGetRewardTo_RevertWhenZero() public {
-        _stake(alice, 100 ether);
-        vm.prank(alice);
-        vm.expectRevert(SinglePoolStaking.InsufficientBalance.selector);
-        staking.getRewardTo(bob);
-    }
-
-    /// @notice `exit` withdraws principal and rewards in one call; both events emitted when > 0.
-    /// @dev Validates balances reset and rewards zeroed.
-    function testExit_BothPrincipalAndReward() public {
+    /// @notice Simulates "exit" semantics: withdraw all principal via delayed flow, then claim rewards.
+    function testWithdrawAllViaDelay_ThenClaimReward() public {
         _stake(alice, 150 ether);
         vm.warp(block.timestamp + 6);
 
-        vm.startPrank(alice);
-        vm.expectEmit(true, true, false, true);
-        emit Withdrawn(alice, alice, 150 ether);
+        // Request all principal
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalRequested(alice, 150 ether, uint64(block.timestamp) + staking.withdrawDelay());
+        vm.prank(alice);
+        staking.requestWithdrawal(150 ether);
+
+        // Complete after delay
+        vm.warp(block.timestamp + staking.withdrawDelay());
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalCompleted(alice, 150 ether);
+        vm.prank(alice);
+        staking.completeWithdrawal();
+
+        // Claim owed rewards
         vm.expectEmit(true, true, false, true);
         emit RewardPaid(alice, alice, 6 ether);
-        staking.exit();
-        vm.stopPrank();
+        vm.prank(alice);
+        staking.getReward();
 
         assertEq(staking.balanceOf(alice), 0, "stake not zeroed");
         assertEq(staking.earned(alice), 0, "rewards not zeroed");
     }
 
-    /// @notice `exit` with reward only emits just `RewardPaid` (no principal).
-    /// @dev Withdraw principal first, then call `exit` to claim owed rewards only.
-    function testExit_RewardOnly() public {
-        _stake(alice, 100 ether);
-        vm.warp(block.timestamp + 4);
-        _withdraw(alice, 100 ether);
-
-        vm.startPrank(alice);
-        vm.expectEmit(true, true, false, true);
-        emit RewardPaid(alice, alice, 4 ether);
-        staking.exit();
-        vm.stopPrank();
-
-        assertEq(staking.balanceOf(alice), 0, "principal unexpectedly present");
-        assertEq(staking.earned(alice), 0, "rewards not zeroed");
-    }
-
-    /// @notice `emergencyWithdraw` reverts when user has no stake.
-    /// @dev Covers explicit `InsufficientBalance` revert.
+    /// @notice `emergencyWithdraw` reverts when disabled or when user has no stake (after enabled).
     function testEmergencyWithdraw_RevertWhenNoStake() public {
+        // Disabled => specific revert
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.EmergencyExitDisabled.selector);
+        staking.emergencyWithdraw();
+
+        // Enable but no stake => InsufficientBalance
+        staking.setEmergencyExitEnabled(true);
         vm.prank(alice);
         vm.expectRevert(SinglePoolStaking.InsufficientBalance.selector);
         staking.emergencyWithdraw();
@@ -470,6 +550,8 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice After emergencyWithdraw, user does not accrue retroactively; new accrual starts only after restake.
     function testEmergencyWithdraw_NoBackAccrualThenRestake() public {
+        staking.setEmergencyExitEnabled(true);
+
         _stake(alice, 200 ether);
         vm.warp(block.timestamp + 5);
         vm.prank(alice);
@@ -486,7 +568,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Equal stakers share rewards proportionally.
-    /// @dev 10s @1 token/sec with two equal stakers → 5 tokens each (view path).
     function testAccrual_ProportionalDistribution() public {
         _stake(alice, 100 ether);
         _stake(bob, 100 ether);
@@ -496,16 +577,14 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice With no stakers, executing a rate change (which snaps global) does not consume reserves.
-    /// @dev Triggers `_updateGlobal()` with `totalStaked == 0` via execute.
     function testAccrual_NoStakersDoesNotConsumeReserves() public {
         // fresh pool
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(1_000 ether);
 
         uint256 before = s.rewardReserves();
 
-        // propose & execute a no-op rate change (same rate)
         s.proposeRewardRate(1e18);
         vm.warp(block.timestamp + 1);
         s.executeRewardRateChange();
@@ -515,9 +594,8 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice State-path reserve cap: accrual is limited by reserves and consumed on update.
-    /// @dev View: `earned()` is capped; State: `getReward()` consumes at most the cap (reserves).
     function testAccrual_StatePathCappedByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(5 ether);
 
@@ -542,7 +620,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Basic stake→earn sanity (single user).
-    /// @dev 10s @1 token/sec should accrue exactly 10 tokens (view path).
     function testStakeAndEarnBasic() public {
         _stake(alice, 100 ether);
         vm.warp(block.timestamp + 10);
@@ -550,11 +627,9 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Ownable2Step: only pending owner can accept; after accept, only new owner can propose.
-    /// @dev Also checks permissionless execution after delay.
     function testOwnership_TwoStepFlow() public {
         address newOwner = makeAddr("newOwner");
 
-        // transferOwnership sets pending but does not change owner
         staking.transferOwnership(newOwner);
         // Old owner still can fund
         staking.fundRewards(1 ether);
@@ -618,25 +693,19 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Executing without any pending proposal should revert.
-    /// @dev Covers the `pending == 0` branch in `executeRewardRateChange`.
     function testExecuteRewardRateChange_Revert_NoPending() public {
-        // Ensure there is no pending change
-        // (Fresh state after Base setUp has no pending)
         vm.expectRevert(SinglePoolStaking.NoPendingRate.selector);
         staking.executeRewardRateChange();
     }
 
     /// @notice Executing before the delay elapses should revert.
-    /// @dev Covers the "delay not met" branch in `executeRewardRateChange`.
     function testExecuteRewardRateChange_Revert_BeforeDelay() public {
         staking.proposeRewardRate(2e18);
-        // Try to execute in the same block (delay not met)
-        vm.expectRevert(); // use specific selector if exposed (e.g., SinglePoolStaking.RateChangeDelayNotMet.selector)
+        vm.expectRevert(); // RateChangeDelayNotMet
         staking.executeRewardRateChange();
     }
 
     /// @notice Only owner can cancel; cancel clears pending state and prevents execution.
-    /// @dev Also asserts event and that execution after cancel reverts (no pending).
     function testCancelRewardRateChange_OnlyOwnerAndResets() public {
         // Propose a change
         staking.proposeRewardRate(2e18);
@@ -653,12 +722,11 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
         // After cancel, executing should revert (no pending)
         vm.warp(block.timestamp + 1);
-        vm.expectRevert(); // use specific selector if exposed
+        vm.expectRevert(); // NoPendingRate
         staking.executeRewardRateChange();
     }
 
     /// @notice Proposing a new rate while one is already pending should overwrite the previous pending rate & timestamp.
-    /// @dev Ensures the *latest* proposal is the one that takes effect after the new delay.
     function testProposeRewardRate_OverridePending_UsesLatest() public {
         // First proposal
         uint64 executeAfter1 = uint64(block.timestamp + 1);
@@ -682,7 +750,6 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     }
 
     /// @notice Proposing a zero rate (pause) and executing should set emission to 0 after delay.
-    /// @dev Hits the "zero rate" value path; useful for auditors evaluating pause semantics.
     function testProposeRewardRate_Zero_SetsToZeroAfterDelay() public {
         // Propose pause
         uint64 executeAfter = uint64(block.timestamp + 1);
@@ -703,5 +770,111 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     function testCancelRewardRateChange_Revert_NoPending() public {
         vm.expectRevert(SinglePoolStaking.NoPendingRate.selector);
         staking.cancelRewardRateChange();
+    }
+
+    /// @notice `rewardsRunwaySeconds` returns reserves/rate; with rate=0 returns max.
+    function testView_rewardsRunwaySeconds_PositiveAndZeroRate() public {
+        // Positive rate case (default: rewardRate = 1 ether/sec, reserves = 100_000 ether from Base)
+        uint256 runway = staking.rewardsRunwaySeconds();
+        assertEq(runway, 100_000, "runway seconds mismatch with positive rate");
+
+        // Set rate to zero via propose/execute and assert max
+        uint64 executeAfter = uint64(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateProposed(0, executeAfter);
+        staking.proposeRewardRate(0);
+        vm.warp(block.timestamp + 1);
+        vm.expectEmit(false, false, false, true);
+        emit RewardRateUpdated(1e18, 0);
+        staking.executeRewardRateChange();
+
+        assertEq(staking.rewardsRunwaySeconds(), type(uint256).max, "runway should be max when rate == 0");
+    }
+
+    /// @notice Owner can set withdraw delay; non-owner reverts; too-large delay reverts.
+    function testAdmin_setWithdrawDelay_Succeeds_RevertsOnTooLong_OnlyOwner() public {
+        // Non-owner cannot set
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        staking.setWithdrawDelay(2 days);
+
+        // Owner sets a valid delay; event should emit
+        uint64 oldDelay = staking.withdrawDelay();
+        uint64 newDelay = 2 days;
+        vm.expectEmit(false, false, false, true);
+        emit WithdrawDelayUpdated(oldDelay, newDelay);
+        staking.setWithdrawDelay(newDelay);
+        assertEq(staking.withdrawDelay(), newDelay, "withdrawDelay not updated");
+
+        // Too long reverts (> MAX_WITHDRAW_DELAY)
+        uint64 tooLong = staking.MAX_WITHDRAW_DELAY() + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(SinglePoolStaking.DelayTooLong.selector, tooLong, staking.MAX_WITHDRAW_DELAY())
+        );
+        staking.setWithdrawDelay(tooLong);
+    }
+
+    /// @notice Owner can set min stake; enforced on stake; non-owner reverts.
+    function testAdmin_setMinStakeAmount_Enforced_OnlyOwner() public {
+        // Non-owner cannot set
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        staking.setMinStakeAmount(50 ether);
+
+        // Owner sets min stake; event should emit
+        uint256 oldMin = staking.minStakeAmount();
+        uint256 minAmt = 50 ether;
+        vm.expectEmit(false, false, false, true);
+        emit MinStakeAmountUpdated(oldMin, minAmt);
+        staking.setMinStakeAmount(minAmt);
+        assertEq(staking.minStakeAmount(), minAmt, "minStakeAmount not updated");
+
+        // Below-min reverts
+        vm.startPrank(alice);
+        stakeToken.approve(address(staking), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.AmountTooLow.selector, 49 ether, minAmt));
+        staking.stake(49 ether);
+
+        // Equal-to-min succeeds
+        staking.stake(50 ether);
+        vm.stopPrank();
+        assertEq(staking.balanceOf(alice), 50 ether, "stake at min should succeed");
+    }
+
+    /// @notice Requesting a second withdrawal while one is pending should revert.
+    function testRequestWithdrawal_RevertWhenPendingExists() public {
+        _stake(alice, 10 ether);
+        vm.prank(alice);
+        staking.requestWithdrawal(4 ether);
+        // Second request should revert
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.PendingWithdrawalExists.selector);
+        staking.requestWithdrawal(1 ether);
+    }
+
+    /// @notice Emergency withdraw returns both staked and pending amounts; totalStaked reduces by only staked.
+    function testEmergencyWithdraw_IncludesPendingAmount() public {
+        staking.setEmergencyExitEnabled(true);
+        _stake(alice, 100 ether);
+
+        // Move some to pending
+        vm.prank(alice);
+        staking.requestWithdrawal(30 ether);
+
+        uint256 beforeBal = stakeToken.balanceOf(alice);
+
+        // Expect to withdraw staked(70) + pending(30) = 100
+        vm.expectEmit(true, true, false, true);
+        emit EmergencyWithdraw(alice, alice, 100 ether);
+        vm.prank(alice);
+        staking.emergencyWithdraw();
+
+        assertEq(stakeToken.balanceOf(alice) - beforeBal, 100 ether, "did not receive staked + pending");
+        assertEq(staking.balanceOf(alice), 0, "stake not zeroed");
+        assertEq(staking.totalStaked(), 0, "totalStaked should subtract only staked (now zero)");
+        // No pending remains
+        vm.prank(alice);
+        vm.expectRevert(SinglePoolStaking.NoPendingWithdrawal.selector);
+        staking.completeWithdrawal();
     }
 }

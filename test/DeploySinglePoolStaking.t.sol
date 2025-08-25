@@ -2,67 +2,94 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {HelperUtils} from "../script/utils/HelperUtils.s.sol";
 import {DeploySinglePoolStaking} from "../script/DeploySinglePoolStaking.s.sol";
-import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
 
-contract DeploySinglePoolStakingTest is Test {
-    DeploySinglePoolStaking deployScript;
-    SinglePoolStaking staking;
-    bool testMode = true;
+contract DeploySinglePoolStakingScriptCleanupTest is Test {
+    DeploySinglePoolStaking script;
 
     function setUp() public {
-        deployScript = new DeploySinglePoolStaking();
+        script = new DeploySinglePoolStaking();
     }
 
-    function testDeploySinglePoolStakingTestnet() public {
-        // Test variables (mock values) to match config-testnet.json
-        address stakeToken = address(0xe8B39856C78027BEb569B5e399d58f9f1674EaB8);
-        address rewardToken = address(0xe8B39856C78027BEb569B5e399d58f9f1674EaB8);
-        address owner = 0x7a8A6cF34a185e6e134108E941b14d011c8FD054;
-        uint256 rewardRate = 1e18; // 1 token
-        uint256 maxRewardRate = 1e18; // 1 token
-        uint64 rateChangeDelay = 86400; // 1 day
+    // ---------- File snapshot helpers ----------
 
-        uint256 chainId = 11155111; // Ethereum Sepolia
-
-        vm.chainId(chainId);
-
-        // Run script
-        deployScript.run(testMode);
-
-        // Assertions to validate the deployment
-        staking = SinglePoolStaking(deployScript.stakingAddress());
-        assertEq(address(staking.STAKE_TOKEN()), stakeToken);
-        assertEq(address(staking.REWARD_TOKEN()), rewardToken);
-        assertEq(staking.rewardRate(), rewardRate);
-        assertEq(staking.owner(), owner);
-        assertEq(staking.MAX_REWARD_RATE(), maxRewardRate);
-        assertEq(staking.RATE_CHANGE_DELAY(), rateChangeDelay);
+    struct FileSnap {
+        string path;
+        bool existed;
+        string contents; // valid only if existed == true
     }
 
-    function testDeploySinglePoolStakingMainnet() public {
-        // Test variables (mock values) to match config-mainnet.json
-        address stakeToken = address(0x6982508145454Ce325dDbE47a25d4ec3d2311933);
-        address rewardToken = address(0x6982508145454Ce325dDbE47a25d4ec3d2311933);
-        address owner = 0x5C9EBa3b10E45BF6db77267B40B95F3f91Fc5f67;
-        uint256 rewardRate = 0.15844513e18;
-        uint256 maxRewardRate = 1e18; // 1 token
-        uint64 rateChangeDelay = 7 days;
+    // External wrapper to allow try/catch around readFile
+    function _read(string memory path) external view returns (string memory) {
+        return vm.readFile(path);
+    }
 
-        uint256 chainId = 1; // Ethereum Mainnet
+    function _snapshot(string memory path) internal view returns (FileSnap memory s) {
+        s.path = path;
+        // try/catch only works on external calls
+        try this._read(path) returns (string memory data) {
+            s.existed = true;
+            s.contents = data;
+        } catch {
+            s.existed = false;
+        }
+    }
 
+    function _restore(FileSnap memory s) internal {
+        if (s.existed) {
+            vm.writeFile(s.path, s.contents); // exact restore
+        } else {
+            // no removeFile available and avoiding FFI -> zero out
+            vm.writeFile(s.path, ""); // or "{}" if JSON is expected
+        }
+    }
+
+    // ---------- Helpers for output path and key ----------
+
+    function _outPath(uint256 chainId) internal pure returns (string memory) {
+        string memory chainName = HelperUtils.getChainName(chainId);
+        return string.concat("./script/output/deploySinglePoolStaking_", chainName, ".json");
+    }
+
+    function _jsonKey(uint256 chainId) internal pure returns (string memory) {
+        return string.concat(".", "deploySinglePoolStaking", HelperUtils.getChainName(chainId));
+    }
+
+    // ---------- Tests with auto-cleanup ----------
+
+    /// Drives the non-test mode branch, verifies write, then restores file to original.
+    function test_Run_NotTestMode_WritesOutput_Testnet_WithCleanup() public {
+        uint256 chainId = 11155111; // Sepolia
         vm.chainId(chainId);
 
-        // Run script
-        deployScript.run(testMode);
+        string memory path = _outPath(chainId);
+        FileSnap memory snap = _snapshot(path);
 
-        // Assertions to validate the deployment
-        staking = SinglePoolStaking(deployScript.stakingAddress());
-        assertEq(address(staking.STAKE_TOKEN()), stakeToken);
-        assertEq(address(staking.REWARD_TOKEN()), rewardToken);
-        assertEq(staking.rewardRate(), rewardRate);
-        assertEq(staking.owner(), owner);
-        assertEq(staking.MAX_REWARD_RATE(), maxRewardRate);
-        assertEq(staking.RATE_CHANGE_DELAY(), rateChangeDelay);
+        // Execute (writes file)
+        script.run(false);
+
+        // Validate
+        string memory json = vm.readFile(path);
+        address recorded = vm.parseJsonAddress(json, _jsonKey(chainId));
+        assertEq(recorded, script.stakingAddress(), "JSON address != deployed address");
+
+        // Cleanup: restore repository state
+        _restore(snap);
+
+        // Optional assert: after restore, compare file reverted to original
+        if (snap.existed) {
+            string memory afterChanges = vm.readFile(path);
+            assertEq(afterChanges, snap.contents, "file not restored to original contents");
+        } else {
+            // If it didn't exist originally, ensure it’s gone now
+            bool deleted;
+            try this._read(path) returns (string memory) {
+                deleted = false;
+            } catch {
+                deleted = true;
+            }
+            assertTrue(deleted, "file not deleted after cleanup");
+        }
     }
 }

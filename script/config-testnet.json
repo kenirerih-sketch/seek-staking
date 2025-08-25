@@ -5,6 +5,8 @@
     "rewardToken": "0xe8B39856C78027BEb569B5e399d58f9f1674EaB8",
     "rewardRate": 1e18,
     "maxRewardRate": 1e18,
-    "rateChangeDelay": 86400
+    "rateChangeDelay": 300,
+    "withdrawDelay": 60,
+    "minStakeAmount": 1e18
   }
 }

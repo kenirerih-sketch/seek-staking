@@ -21,7 +21,6 @@ abstract contract SinglePoolStakingBase is Test {
 
     // Mirror events for expectEmit
     event Staked(address indexed sender, address indexed to, uint256 amount);
-    event Withdrawn(address indexed sender, address indexed to, uint256 amount);
     event RewardPaid(address indexed user, address indexed to, uint256 amount);
     event RewardRateProposed(uint256 proposedRate, uint64 executeAfter);
     event RewardRateChangeCanceled(uint256 canceledRate);
@@ -29,6 +28,22 @@ abstract contract SinglePoolStakingBase is Test {
     event RewardsFunded(address indexed from, uint256 amount, uint256 newReserves);
     event EmergencyWithdraw(address indexed user, address indexed to, uint256 amount);
     event RescueTokens(address indexed token, address indexed to, uint256 amount);
+    event EmergencyExitEnabled(bool enabled);
+    event MinStakeAmountUpdated(uint256 oldAmount, uint256 newAmount);
+    event WithdrawDelayUpdated(uint64 oldDelay, uint64 newDelay);
+    event WithdrawalRequested(address indexed user, uint256 amount, uint64 unlockTimestamp);
+    event WithdrawalCompleted(address indexed user, uint256 amount);
+    event WithdrawalCanceled(address indexed user, uint256 amount);
+    event Initialized(
+        address indexed _stakeToken,
+        address indexed _rewardToken,
+        uint256 _initialRewardRate,
+        address indexed initialOwner,
+        uint256 _maxRewardRate,
+        uint64 _rateChangeDelay,
+        uint64 _initialWithdrawDelay,
+        uint256 _minStakeAmount
+    );
 
     /// @notice Deploys tokens, staking, and prefunds reserves.
     function setUp() public virtual {
@@ -36,7 +51,17 @@ abstract contract SinglePoolStakingBase is Test {
         stakeToken = new ERC20Token("Stake Token", "STK", 1_000_000 ether, owner);
 
         // Deploy staking: same token for stake & reward, rate = 1 token/s
-        staking = new SinglePoolStaking(stakeToken, stakeToken, 1e18, owner, 5e18, 1);
+        // params: (stakeToken, rewardToken, initialRate, owner, maxRate, rateChangeDelay, initialWithdrawDelay, minStakeAmount)
+        staking = new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // rewardRate = 1 token/s
+            owner,
+            5e18, // MAX_REWARD_RATE
+            1, // RATE_CHANGE_DELAY (seconds)
+            1, // withdrawDelay (seconds) — keeps tests snappy
+            0 // minStakeAmount
+        );
 
         // Distribute balances to actors
         bool aliceTransferSuccess = stakeToken.transfer(alice, 10_000 ether);
@@ -59,10 +84,24 @@ abstract contract SinglePoolStakingBase is Test {
         vm.stopPrank();
     }
 
-    /// @dev Withdraws `amount` of staked tokens for `who`.
-    function _withdraw(address who, uint256 amount) internal {
+    /// @dev Request a delayed withdrawal of `amount` for `who` (does not advance time).
+    function _requestWithdrawal(address who, uint256 amount) internal {
         vm.prank(who);
-        staking.withdraw(amount);
+        staking.requestWithdrawal(amount);
+    }
+
+    /// @dev Complete a previously requested withdrawal for `who` (assumes delay has elapsed).
+    function _completeWithdrawal(address who) internal {
+        vm.prank(who);
+        staking.completeWithdrawal();
+    }
+
+    /// @dev Convenience: request withdrawal and then fast-forward by the contract's withdrawDelay, then complete.
+    function _withdrawAfterDelay(address who, uint256 amount) internal {
+        _requestWithdrawal(who, amount);
+        uint64 delay = staking.withdrawDelay();
+        vm.warp(block.timestamp + delay);
+        _completeWithdrawal(who);
     }
 
     /// @dev Claims all accrued rewards for `who`.

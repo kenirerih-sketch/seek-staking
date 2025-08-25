@@ -60,7 +60,7 @@ install:
 	forge install
 
 test:
-	forge test -vvv
+	forge test -vvvv
 
 coverage:
 	forge coverage
@@ -79,7 +79,7 @@ deploy-staking:
 	@forge script script/DeploySinglePoolStaking.s.sol --sig "run(bool)" false $(NETWORK_ARGS) --verify
 
 # Local test for staking deploy
-test-deploy-staking:
+test-staking-deploy:
 	@forge test --match-contract DeploySinglePoolStaking -vvvv
 
 test-staking-unit:
