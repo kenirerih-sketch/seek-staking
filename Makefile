@@ -75,6 +75,8 @@ clean:
 	forge clean
 
 # Deploy Staking
+# May need --resume if re-running on the same network
+# 	@forge script script/DeploySinglePoolStaking.s.sol --sig "run(bool)" false $(NETWORK_ARGS) --resume --verify
 deploy-staking:
 	@forge script script/DeploySinglePoolStaking.s.sol --sig "run(bool)" false $(NETWORK_ARGS) --verify
 
