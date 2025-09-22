@@ -1,5 +1,5 @@
 # SinglePoolStaking
-[Git Source](https://github.com/TalismanSociety/seek-staking/blob/5127722128a2c621acd1ff1b33fab79798bcfc64/src/SinglePoolStaking.sol)
+[Git Source](https://github.com/TalismanSociety/seek-staking/blob/60eef592486ac6cd6a94d5a30eefd200b257718f/src/SinglePoolStaking.sol)
 
 **Inherits:**
 Ownable2Step, ReentrancyGuard
@@ -146,6 +146,15 @@ uint256 public immutable MAX_REWARD_RATE;
 ```
 
 
+### MIN_REWARD_RATE
+Minimum allowed emission rate (tokens/sec). Set to 0 to allow pausing.
+
+
+```solidity
+uint256 public immutable MIN_REWARD_RATE;
+```
+
+
 ### MAX_WITHDRAW_DELAY
 Maximum withdraw delay (in seconds).
 
@@ -199,7 +208,7 @@ uint256 public minStakeAmount;
 
 Deploy the staking pool.
 
-*Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.*
+*Sets `lastUpdateTime` to `block.timestamp` and enforces `_minRewardRate <= _initialRewardRate <= _maxRewardRate`.*
 
 
 ```solidity
@@ -209,6 +218,7 @@ constructor(
     uint256 _initialRewardRate,
     address initialOwner,
     uint256 _maxRewardRate,
+    uint256 _minRewardRate,
     uint64 _rateChangeDelay,
     uint64 _initialWithdrawDelay,
     uint256 _minStakeAmount
@@ -223,6 +233,7 @@ constructor(
 |`_initialRewardRate`|`uint256`|Initial `rewardRate` in tokens per second.|
 |`initialOwner`|`address`|Address to receive contract ownership.|
 |`_maxRewardRate`|`uint256`|Governance max for `rewardRate` (tokens/sec).|
+|`_minRewardRate`|`uint256`|Governance min for `rewardRate` (tokens/sec). Set to 0 to allow pausing.|
 |`_rateChangeDelay`|`uint64`|Timelock delay for rate changes (in seconds).|
 |`_initialWithdrawDelay`|`uint64`|Initial locked withdrawal delay (in seconds).|
 |`_minStakeAmount`|`uint256`|Minimum amount required to stake or withdraw.|
@@ -331,7 +342,7 @@ function rewardsRunwaySeconds() external view returns (uint256);
 
 Propose a new reward emission rate (tokens per second), subject to a delay.
 
-*Enforces `MAX_REWARD_RATE`. Allows pausing with `0`. Emits `RewardRateProposed`.*
+*Enforces `MIN_REWARD_RATE` and `MAX_REWARD_RATE`. Allows pausing with `0` if `MIN_REWARD_RATE` is 0. Emits `RewardRateProposed`.*
 
 
 ```solidity
@@ -640,6 +651,7 @@ event Initialized(
     uint256 _initialRewardRate,
     address indexed initialOwner,
     uint256 _maxRewardRate,
+    uint256 _minRewardRate,
     uint64 _rateChangeDelay,
     uint64 _initialWithdrawDelay,
     uint256 _minStakeAmount
@@ -655,6 +667,7 @@ event Initialized(
 |`_initialRewardRate`|`uint256`|Initial `rewardRate` in tokens per second.|
 |`initialOwner`|`address`|Address to receive contract ownership.|
 |`_maxRewardRate`|`uint256`|Governance max for `rewardRate` (tokens/sec).|
+|`_minRewardRate`|`uint256`||
 |`_rateChangeDelay`|`uint64`|Timelock delay for rate changes (in seconds).|
 |`_initialWithdrawDelay`|`uint64`|Initial locked withdrawal delay (in seconds).|
 |`_minStakeAmount`|`uint256`|Minimum amount required to stake.|
@@ -957,6 +970,21 @@ error RewardRateTooHigh(uint256 requested, uint256 max);
 |----|----|-----------|
 |`requested`|`uint256`|The requested rate.|
 |`max`|`uint256`|The maximum allowed rate.|
+
+### RewardRateTooLow
+Thrown when a proposed reward rate is below the minimum allowed rate.
+
+
+```solidity
+error RewardRateTooLow(uint256 requested, uint256 min);
+```
+
+**Parameters**
+
+|Name|Type|Description|
+|----|----|-----------|
+|`requested`|`uint256`|The requested rate.|
+|`min`|`uint256`|The minimum allowed rate.|
 
 ### RateChangeDelayNotMet
 Thrown when trying to execute a rate change before the timelock elapses.
