@@ -1011,4 +1011,40 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         assertEq(staking.pendingRewardRate(), 2e18, "pending reward rate not set");
         assertGt(staking.rateChangeExecuteAfter(), 0, "execute after timestamp not set");
     }
+
+    /// @notice Test that the reserve griefing attack via rounding is fixed.
+    /// @dev This test reproduces the PoC provided by auditors to verify the fix.
+    ///      The attack: when newly = 1 and totalStaked = 100 ether, the calculation
+    ///      (newly * 1e18) / totalStaked = (1 * 1e18) / (100 * 1e18) = 0 due to rounding.
+    ///      Before the fix, reserves were consumed even when no rewards were accounted.
+    ///      After the fix, reserves should only be consumed when rewards are actually accounted.
+    function testReserveDrain_ViaRounding_Fixed() public {
+        // Setup: Stake 100 ether and set reward rate to 1 token/sec
+        _stake(alice, 100 ether);
+        staking.proposeRewardRate(1);
+        vm.warp(block.timestamp + 1);
+        staking.executeRewardRateChange();
+        assertEq(staking.rewardRate(), 1, "reward rate should be 1");
+
+        uint256 reservesBefore = staking.rewardReserves();
+
+        // Attempt the attack: repeatedly request/cancel withdrawal to trigger _updateGlobal
+        // Each iteration should advance time by 1 second, creating newly = 1
+        // With totalStaked = 100 ether, rewardPerTokenIncrease = (1 * 1e18) / (100 * 1e18) = 0
+        uint256 iterations = 20;
+        vm.startPrank(alice);
+        for (uint256 i = 0; i < iterations; i++) {
+            vm.warp(block.timestamp + 1); // elapsed = 1s → newly = 1
+            staking.requestWithdrawal(1);
+            staking.cancelWithdrawal();
+        }
+        vm.stopPrank();
+
+        uint256 reservesAfter = staking.rewardReserves();
+
+        // With the fix, reserves should NOT be drained
+        // Before fix: reservesBefore - reservesAfter = iterations (20)
+        // After fix: reservesBefore - reservesAfter = 0 (no drain)
+        assertEq(reservesBefore, reservesAfter, "Reserves should not be drained due to rounding");
+    }
 }
