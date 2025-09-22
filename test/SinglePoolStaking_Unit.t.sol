@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -76,7 +76,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         WeirdRewardToken weird = new WeirdRewardToken("WRD", "WRD", 1_000_000 ether);
         // reward token is weird; withdraw delay and min stake are trivial for tests
         SinglePoolStaking s =
-            new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 1, 1, 0);
+            new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 0, 1, 1, 0);
 
         weird.approve(address(s), type(uint256).max);
         weird.setNoMove(true);
@@ -309,19 +309,19 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice Constructor: zero-address guard for stake token.
     function testConstructor_RevertOnZeroStakeToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for reward token.
     function testConstructor_RevertOnZeroRewardToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1, 1, 0);
+        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for contract owner.
     function testConstructor_RevertOnZeroOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 1, 1, 0);
+        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: initial withdraw delay > MAX_WITHDRAW_DELAY must revert.
@@ -334,6 +334,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
             1e18, // initial rate
             address(this), // owner
             1e18, // max rate
+            0, // min rate
             1, // rate change delay
             tooLong, // initial withdraw delay (too large)
             0 // min stake
@@ -369,7 +370,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice `rewardPerToken` is capped by `rewardReserves` in the view path.
     function testView_rewardPerToken_CapsByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(10 ether);
 
@@ -456,7 +457,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice Cannot rescue the reward token when stake != reward (distinct invalid branch).
     function testRescueTokens_InvalidForRewardToken_WhenDifferentTokens() public {
         ERC20Token reward2 = new ERC20Token("R", "R", 1_000_000 ether, address(this));
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 0, 1, 1, 0);
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
         s.rescueTokens(reward2, address(this), 1 ether);
     }
@@ -579,7 +580,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice With no stakers, executing a rate change (which snaps global) does not consume reserves.
     function testAccrual_NoStakersDoesNotConsumeReserves() public {
         // fresh pool
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(1_000 ether);
 
@@ -595,7 +596,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice State-path reserve cap: accrual is limited by reserves and consumed on update.
     function testAccrual_StatePathCappedByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(5 ether);
 
@@ -876,5 +877,174 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         vm.prank(alice);
         vm.expectRevert(SinglePoolStaking.NoPendingWithdrawal.selector);
         staking.completeWithdrawal();
+    }
+
+    /// @notice Test that prevents rounding grief attack where rewardReserves are consumed without accruing rewards.
+    /// @dev This test verifies the fix for the audit issue where setting rewardRate=1 wei/sec with totalStaked > 1 ether
+    ///      would cause rewardReserves to be decremented even when rewardPerTokenStored rounds down to 0.
+    function testRoundingGriefAttack_Prevented() public {
+        // Ensure we have sufficient reserves for the test
+        staking.fundRewards(1000 ether);
+
+        // Set up the attack scenario: rewardRate = 1 wei/sec, totalStaked > 1 ether
+        staking.proposeRewardRate(1); // 1 wei per second
+        vm.warp(block.timestamp + 1); // execute after delay
+        staking.executeRewardRateChange();
+
+        // Stake a large amount (> 1 ether) to trigger the rounding issue
+        uint256 largeStake = 2 ether;
+        _stake(alice, largeStake);
+
+        // Record initial state
+        uint256 initialRewardReserves = staking.rewardReserves();
+        uint256 initialRewardPerTokenStored = staking.rewardPerTokenStored();
+
+        // Advance time by 1 second - this should trigger the rounding issue
+        // newly = 1 * 1 = 1 wei
+        // rewardPerTokenIncrease = (1 * 1e18) / 2e18 = 0 (due to integer division)
+        vm.warp(block.timestamp + 1);
+
+        // Trigger _updateGlobal() by calling a function that updates user state
+        // We use requestWithdrawal instead of getReward since getReward reverts when rewards = 0
+        vm.prank(alice);
+        staking.requestWithdrawal(1 ether);
+
+        // Verify that rewardReserves were NOT decremented when rewardPerTokenStored didn't increase
+        uint256 finalRewardReserves = staking.rewardReserves();
+        uint256 finalRewardPerTokenStored = staking.rewardPerTokenStored();
+
+        // The key assertion: reserves should remain unchanged when no rewards are actually accrued
+        assertEq(
+            finalRewardReserves,
+            initialRewardReserves,
+            "rewardReserves should not decrease when rounding causes zero accrual"
+        );
+        assertEq(
+            finalRewardPerTokenStored,
+            initialRewardPerTokenStored,
+            "rewardPerTokenStored should not increase when rounding causes zero accrual"
+        );
+
+        // Verify that alice received no rewards due to the rounding
+        assertEq(staking.earned(alice), 0, "user should receive no rewards when rounding causes zero accrual");
+    }
+
+    /// @notice Constructor: initial reward rate below minimum should revert.
+    function testConstructor_RevertOnInitialRewardRateTooLow() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 0, 1e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            0, // initial rate (too low)
+            address(this),
+            5e18, // max rate
+            1e18, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Constructor: initial reward rate above maximum should revert.
+    function testConstructor_RevertOnInitialRewardRateTooHigh() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooHigh.selector, 6e18, 5e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            6e18, // initial rate (too high)
+            address(this),
+            5e18, // max rate
+            0, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Constructor: min reward rate above max reward rate should revert.
+    function testConstructor_RevertOnMinRewardRateAboveMax() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 2e18, 1e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // initial rate
+            address(this),
+            1e18, // max rate
+            2e18, // min rate (above max)
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Propose reward rate below minimum should revert.
+    function testProposeRewardRate_RevertBelowMin_NewValidation() public {
+        // Create a staking contract with min reward rate = 1e18
+        SinglePoolStaking s = new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // initial rate
+            address(this),
+            5e18, // max rate
+            1e18, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 0, 1e18));
+        s.proposeRewardRate(0); // below minimum
+    }
+
+    /// @notice Propose reward rate above maximum should revert (new validation test).
+    function testProposeRewardRate_RevertAboveMax_NewValidation() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooHigh.selector, 6e18, 5e18));
+        staking.proposeRewardRate(6e18); // above maximum
+    }
+
+    /// @notice Propose reward rate within bounds should succeed.
+    function testProposeRewardRate_WithinBounds_Succeeds() public {
+        // Should succeed with rate between min (0) and max (5e18)
+        staking.proposeRewardRate(2e18);
+
+        // Verify the proposal was set
+        assertEq(staking.pendingRewardRate(), 2e18, "pending reward rate not set");
+        assertGt(staking.rateChangeExecuteAfter(), 0, "execute after timestamp not set");
+    }
+
+    /// @notice Test that the reserve griefing attack via rounding is fixed.
+    /// @dev This test reproduces the PoC provided by auditors to verify the fix.
+    ///      The attack: when newly = 1 and totalStaked = 100 ether, the calculation
+    ///      (newly * 1e18) / totalStaked = (1 * 1e18) / (100 * 1e18) = 0 due to rounding.
+    ///      Before the fix, reserves were consumed even when no rewards were accounted.
+    ///      After the fix, reserves should only be consumed when rewards are actually accounted.
+    function testReserveDrain_ViaRounding_Fixed() public {
+        // Setup: Stake 100 ether and set reward rate to 1 token/sec
+        _stake(alice, 100 ether);
+        staking.proposeRewardRate(1);
+        vm.warp(block.timestamp + 1);
+        staking.executeRewardRateChange();
+        assertEq(staking.rewardRate(), 1, "reward rate should be 1");
+
+        uint256 reservesBefore = staking.rewardReserves();
+
+        // Attempt the attack: repeatedly request/cancel withdrawal to trigger _updateGlobal
+        // Each iteration should advance time by 1 second, creating newly = 1
+        // With totalStaked = 100 ether, rewardPerTokenIncrease = (1 * 1e18) / (100 * 1e18) = 0
+        uint256 iterations = 20;
+        vm.startPrank(alice);
+        for (uint256 i = 0; i < iterations; i++) {
+            vm.warp(block.timestamp + 1); // elapsed = 1s → newly = 1
+            staking.requestWithdrawal(1);
+            staking.cancelWithdrawal();
+        }
+        vm.stopPrank();
+
+        uint256 reservesAfter = staking.rewardReserves();
+
+        // With the fix, reserves should NOT be drained
+        // Before fix: reservesBefore - reservesAfter = iterations (20)
+        // After fix: reservesBefore - reservesAfter = 0 (no drain)
+        assertEq(reservesBefore, reservesAfter, "Reserves should not be drained due to rounding");
     }
 }

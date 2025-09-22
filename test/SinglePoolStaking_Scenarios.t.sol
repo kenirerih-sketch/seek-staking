@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.20;
 
 import {SinglePoolStakingBase} from "./BaseSinglePoolStaking.t.sol";
 import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
@@ -283,6 +283,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
                 5e18, // 5 tokens/sec
                 address(this),
                 5e18, // MAX_REWARD_RATE
+                0, // MIN_REWARD_RATE
                 1, // RATE_CHANGE_DELAY
                 1, // withdrawDelay
                 0 // minStakeAmount
@@ -455,6 +456,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             1e18, // 1 token/sec
             address(this),
             5e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE
             1, // RATE_CHANGE_DELAY
             1, // withdrawDelay
             0 // minStakeAmount
@@ -464,8 +466,8 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
 
         address u1 = makeAddr("consU1");
         address u2 = makeAddr("consU2");
-        stakeToken.transfer(u1, 100 ether);
-        stakeToken.transfer(u2, 100 ether);
+        require(stakeToken.transfer(u1, 100 ether), "Transfer to u1 failed");
+        require(stakeToken.transfer(u2, 100 ether), "Transfer to u2 failed");
 
         vm.startPrank(u1);
         stakeToken.approve(address(s), type(uint256).max);
@@ -533,6 +535,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             1e18, // 1 token/sec
             address(this),
             5e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE
             1, // RATE_CHANGE_DELAY
             1, // withdrawDelay (arbitrary for this test)
             0 // minStakeAmount

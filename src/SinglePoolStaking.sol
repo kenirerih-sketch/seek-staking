@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.20;
 
 /*
 
@@ -127,6 +127,7 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         uint256 _initialRewardRate,
         address indexed initialOwner,
         uint256 _maxRewardRate,
+        uint256 _minRewardRate,
         uint64 _rateChangeDelay,
         uint64 _initialWithdrawDelay,
         uint256 _minStakeAmount
@@ -240,6 +241,11 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param max The maximum allowed rate.
     error RewardRateTooHigh(uint256 requested, uint256 max);
 
+    /// @notice Thrown when a proposed reward rate is below the minimum allowed rate.
+    /// @param requested The requested rate.
+    /// @param min The minimum allowed rate.
+    error RewardRateTooLow(uint256 requested, uint256 min);
+
     /// @notice Thrown when trying to execute a rate change before the timelock elapses.
     /// @param executeAfter The timestamp after which execution is allowed.
     error RateChangeDelayNotMet(uint64 executeAfter);
@@ -261,6 +267,9 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
 
     /// @notice Maximum allowed emission rate (tokens/sec).
     uint256 public immutable MAX_REWARD_RATE;
+
+    /// @notice Minimum allowed emission rate (tokens/sec). Set to 0 to allow pausing.
+    uint256 public immutable MIN_REWARD_RATE;
 
     /// @notice Maximum withdraw delay (in seconds).
     /// @dev This is a governance-controlled parameter that can be adjusted by the owner.
@@ -287,16 +296,18 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @param _initialRewardRate Initial `rewardRate` in tokens per second.
     /// @param initialOwner Address to receive contract ownership.
     /// @param _maxRewardRate Governance max for `rewardRate` (tokens/sec).
+    /// @param _minRewardRate Governance min for `rewardRate` (tokens/sec). Set to 0 to allow pausing.
     /// @param _rateChangeDelay Timelock delay for rate changes (in seconds).
     /// @param _initialWithdrawDelay Initial locked withdrawal delay (in seconds).
     /// @param _minStakeAmount Minimum amount required to stake or withdraw.
-    /// @dev Sets `lastUpdateTime` to `block.timestamp` and enforces `_initialRewardRate <= _maxRewardRate`.
+    /// @dev Sets `lastUpdateTime` to `block.timestamp` and enforces `_minRewardRate <= _initialRewardRate <= _maxRewardRate`.
     constructor(
         IERC20 _stakeToken,
         IERC20 _rewardToken,
         uint256 _initialRewardRate,
         address initialOwner,
         uint256 _maxRewardRate,
+        uint256 _minRewardRate,
         uint64 _rateChangeDelay,
         uint64 _initialWithdrawDelay,
         uint256 _minStakeAmount
@@ -304,10 +315,14 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         if (address(_stakeToken) == address(0)) revert InvalidToken();
         if (address(_rewardToken) == address(0)) revert InvalidToken();
         if (_initialWithdrawDelay > MAX_WITHDRAW_DELAY) revert DelayTooLong(_initialWithdrawDelay, MAX_WITHDRAW_DELAY);
+        if (_minRewardRate > _maxRewardRate) revert RewardRateTooLow(_minRewardRate, _maxRewardRate);
+        if (_initialRewardRate < _minRewardRate) revert RewardRateTooLow(_initialRewardRate, _minRewardRate);
+        if (_initialRewardRate > _maxRewardRate) revert RewardRateTooHigh(_initialRewardRate, _maxRewardRate);
 
         STAKE_TOKEN = _stakeToken;
         REWARD_TOKEN = _rewardToken;
         MAX_REWARD_RATE = _maxRewardRate;
+        MIN_REWARD_RATE = _minRewardRate;
         RATE_CHANGE_DELAY = _rateChangeDelay;
 
         rewardRate = _initialRewardRate;
@@ -321,6 +336,7 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
             _initialRewardRate,
             initialOwner,
             _maxRewardRate,
+            _minRewardRate,
             _rateChangeDelay,
             _initialWithdrawDelay,
             _minStakeAmount
@@ -390,9 +406,10 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     // =========================
 
     /// @notice Propose a new reward emission rate (tokens per second), subject to a delay.
-    /// @dev Enforces `MAX_REWARD_RATE`. Allows pausing with `0`. Emits `RewardRateProposed`.
+    /// @dev Enforces `MIN_REWARD_RATE` and `MAX_REWARD_RATE`. Allows pausing with `0` if `MIN_REWARD_RATE` is 0. Emits `RewardRateProposed`.
     /// @param _newRate The proposed `rewardRate` value (tokens/sec).
     function proposeRewardRate(uint256 _newRate) external onlyOwner {
+        if (_newRate < MIN_REWARD_RATE) revert RewardRateTooLow(_newRate, MIN_REWARD_RATE);
         if (_newRate > MAX_REWARD_RATE) revert RewardRateTooHigh(_newRate, MAX_REWARD_RATE);
         uint64 execAfter = uint64(block.timestamp) + RATE_CHANGE_DELAY;
 
@@ -678,8 +695,11 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
             }
 
             if (newly > 0) {
-                rewardPerTokenStored += (newly * 1e18) / totalStaked;
-                rewardReserves -= newly; // move from reserves to "owed but unpaid"
+                uint256 rewardPerTokenIncrease = (newly * 1e18) / totalStaked;
+                if (rewardPerTokenIncrease > 0) {
+                    rewardPerTokenStored += rewardPerTokenIncrease;
+                    rewardReserves -= newly; // move from reserves to "owed but unpaid"
+                }
             }
         }
 

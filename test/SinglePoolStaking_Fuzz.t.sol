@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.20;
 
 import {SinglePoolStakingBase} from "./BaseSinglePoolStaking.t.sol";
 import {SinglePoolStaking} from "../src/SinglePoolStaking.sol";
@@ -74,6 +74,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
                 1e18,
                 address(this),
                 1e18,
+                0, // MIN_REWARD_RATE
                 1, // RATE_CHANGE_DELAY
                 1, // withdrawDelay
                 0 // minStakeAmount

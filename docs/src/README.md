@@ -114,8 +114,9 @@ Example `config.json` file:
   "staking": {
     "stakeToken": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
     "rewardToken": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
-    "rewardRate": 2e18,
-    "maxRewardRate": 1e18,
+    "rewardRate": 1e18,
+    "maxRewardRate": 5e18,
+    "minRewardRate": 0,
     "rateChangeDelay": 604800,
     "withdrawDelay": 604800,
     "minStakeAmount": 1e18
@@ -131,9 +132,10 @@ The `config.json` file contains the following parameters:
 | `rewardToken`     | The address of the deployed reward token, same as stake token                           |
 | `rewardRate`      | How many tokens are issued as rewards per second.                                       |
 | `owner`           | The address to own the contract.                                                        |
-| `maxRewardRate`   | Max token issued as rewards per second                                                  |
+| `maxRewardRate`   | Maximum tokens issued as rewards per second                                             |
+| `minRewardRate`   | Minimum tokens issued as rewards per second (set to 0 to allow pausing)                 |
 | `rateChangeDelay` | Delay in seconds between proposing a new reward rate and executing it                   |
-| `withdrawDelay`   | The minimum wait time between a user’s withdrawal request and when they can complete it |
+| `withdrawDelay`   | The minimum wait time between a user's withdrawal request and when they can complete it |
 | `minStakeAmount`  | Minimum amount of tokens to stake                                                       |
 
 ### Testing

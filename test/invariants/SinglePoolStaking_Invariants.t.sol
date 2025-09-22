@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
@@ -51,6 +51,7 @@ contract SinglePoolStaking_Invariants is StdInvariant, Test {
             1e18, // initial reward rate (1 token/sec)
             owner, // owner
             1e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE
             1, // RATE_CHANGE_DELAY (1s for tests)
             1, // withdrawDelay (1s for tests)
             0 // minStakeAmount

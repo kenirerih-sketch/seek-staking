@@ -98,14 +98,14 @@ test-staking-invariants:
 
 # -------- Slither (Static Analysis) --------
 # Target contract (limit analysis scope for speed/signal)
-SLITHER_TARGET ?= src/SinglePoolStaking.sol:SinglePoolStaking
+SLITHER_TARGET ?= src/SinglePoolStaking.sol
 
 # Generate remappings.txt from Foundry for Slither
 remappings:
 	@forge remappings > remappings.txt
 
 # Common Slither flags (Foundry-aware)
-SLITHER_FLAGS ?= --foundry-out-directory out --foundry-remappings remappings.txt --disable-color
+SLITHER_FLAGS ?= --foundry-out-directory out --solc-remaps remappings.txt --disable-color
 
 # Install Slither locally (pipx recommended)
 slither-install:
