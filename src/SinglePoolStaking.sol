@@ -678,8 +678,11 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
             }
 
             if (newly > 0) {
-                rewardPerTokenStored += (newly * 1e18) / totalStaked;
-                rewardReserves -= newly; // move from reserves to "owed but unpaid"
+                uint256 rewardPerTokenIncrease = (newly * 1e18) / totalStaked;
+                if (rewardPerTokenIncrease > 0) {
+                    rewardPerTokenStored += rewardPerTokenIncrease;
+                    rewardReserves -= newly; // move from reserves to "owed but unpaid"
+                }
             }
         }
 

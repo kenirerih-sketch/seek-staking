@@ -877,4 +877,54 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         vm.expectRevert(SinglePoolStaking.NoPendingWithdrawal.selector);
         staking.completeWithdrawal();
     }
+
+    /// @notice Test that prevents rounding grief attack where rewardReserves are consumed without accruing rewards.
+    /// @dev This test verifies the fix for the audit issue where setting rewardRate=1 wei/sec with totalStaked > 1 ether
+    ///      would cause rewardReserves to be decremented even when rewardPerTokenStored rounds down to 0.
+    function testRoundingGriefAttack_Prevented() public {
+        // Ensure we have sufficient reserves for the test
+        staking.fundRewards(1000 ether);
+
+        // Set up the attack scenario: rewardRate = 1 wei/sec, totalStaked > 1 ether
+        staking.proposeRewardRate(1); // 1 wei per second
+        vm.warp(block.timestamp + 1); // execute after delay
+        staking.executeRewardRateChange();
+
+        // Stake a large amount (> 1 ether) to trigger the rounding issue
+        uint256 largeStake = 2 ether;
+        _stake(alice, largeStake);
+
+        // Record initial state
+        uint256 initialRewardReserves = staking.rewardReserves();
+        uint256 initialRewardPerTokenStored = staking.rewardPerTokenStored();
+
+        // Advance time by 1 second - this should trigger the rounding issue
+        // newly = 1 * 1 = 1 wei
+        // rewardPerTokenIncrease = (1 * 1e18) / 2e18 = 0 (due to integer division)
+        vm.warp(block.timestamp + 1);
+
+        // Trigger _updateGlobal() by calling a function that updates user state
+        // We use requestWithdrawal instead of getReward since getReward reverts when rewards = 0
+        vm.prank(alice);
+        staking.requestWithdrawal(1 ether);
+
+        // Verify that rewardReserves were NOT decremented when rewardPerTokenStored didn't increase
+        uint256 finalRewardReserves = staking.rewardReserves();
+        uint256 finalRewardPerTokenStored = staking.rewardPerTokenStored();
+
+        // The key assertion: reserves should remain unchanged when no rewards are actually accrued
+        assertEq(
+            finalRewardReserves,
+            initialRewardReserves,
+            "rewardReserves should not decrease when rounding causes zero accrual"
+        );
+        assertEq(
+            finalRewardPerTokenStored,
+            initialRewardPerTokenStored,
+            "rewardPerTokenStored should not increase when rounding causes zero accrual"
+        );
+
+        // Verify that alice received no rewards due to the rounding
+        assertEq(staking.earned(alice), 0, "user should receive no rewards when rounding causes zero accrual");
+    }
 }
