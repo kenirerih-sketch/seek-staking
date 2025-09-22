@@ -466,8 +466,8 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
 
         address u1 = makeAddr("consU1");
         address u2 = makeAddr("consU2");
-        stakeToken.transfer(u1, 100 ether);
-        stakeToken.transfer(u2, 100 ether);
+        require(stakeToken.transfer(u1, 100 ether), "Transfer to u1 failed");
+        require(stakeToken.transfer(u2, 100 ether), "Transfer to u2 failed");
 
         vm.startPrank(u1);
         stakeToken.approve(address(s), type(uint256).max);
