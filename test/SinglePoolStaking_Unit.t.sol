@@ -76,7 +76,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         WeirdRewardToken weird = new WeirdRewardToken("WRD", "WRD", 1_000_000 ether);
         // reward token is weird; withdraw delay and min stake are trivial for tests
         SinglePoolStaking s =
-            new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 1, 1, 0);
+            new SinglePoolStaking(stakeToken, IERC20(address(weird)), 1e18, address(this), 1e18, 0, 1, 1, 0);
 
         weird.approve(address(s), type(uint256).max);
         weird.setNoMove(true);
@@ -309,19 +309,19 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice Constructor: zero-address guard for stake token.
     function testConstructor_RevertOnZeroStakeToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        new SinglePoolStaking(IERC20(address(0)), stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for reward token.
     function testConstructor_RevertOnZeroRewardToken() public {
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
-        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 1, 1, 0);
+        new SinglePoolStaking(stakeToken, IERC20(address(0)), 1e18, address(this), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: zero-address guard for contract owner.
     function testConstructor_RevertOnZeroOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 1, 1, 0);
+        new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(0), 1e18, 0, 1, 1, 0);
     }
 
     /// @notice Constructor: initial withdraw delay > MAX_WITHDRAW_DELAY must revert.
@@ -334,6 +334,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
             1e18, // initial rate
             address(this), // owner
             1e18, // max rate
+            0, // min rate
             1, // rate change delay
             tooLong, // initial withdraw delay (too large)
             0 // min stake
@@ -369,7 +370,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice `rewardPerToken` is capped by `rewardReserves` in the view path.
     function testView_rewardPerToken_CapsByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(10 ether);
 
@@ -456,7 +457,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice Cannot rescue the reward token when stake != reward (distinct invalid branch).
     function testRescueTokens_InvalidForRewardToken_WhenDifferentTokens() public {
         ERC20Token reward2 = new ERC20Token("R", "R", 1_000_000 ether, address(this));
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, reward2, 1e18, address(this), 1e18, 0, 1, 1, 0);
         vm.expectRevert(SinglePoolStaking.InvalidToken.selector);
         s.rescueTokens(reward2, address(this), 1 ether);
     }
@@ -579,7 +580,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
     /// @notice With no stakers, executing a rate change (which snaps global) does not consume reserves.
     function testAccrual_NoStakersDoesNotConsumeReserves() public {
         // fresh pool
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(1_000 ether);
 
@@ -595,7 +596,7 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
     /// @notice State-path reserve cap: accrual is limited by reserves and consumed on update.
     function testAccrual_StatePathCappedByReserves() public {
-        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 1, 1, 0);
+        SinglePoolStaking s = new SinglePoolStaking(stakeToken, stakeToken, 1e18, address(this), 1e18, 0, 1, 1, 0);
         stakeToken.approve(address(s), type(uint256).max);
         s.fundRewards(5 ether);
 
@@ -926,5 +927,88 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
 
         // Verify that alice received no rewards due to the rounding
         assertEq(staking.earned(alice), 0, "user should receive no rewards when rounding causes zero accrual");
+    }
+
+    /// @notice Constructor: initial reward rate below minimum should revert.
+    function testConstructor_RevertOnInitialRewardRateTooLow() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 0, 1e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            0, // initial rate (too low)
+            address(this),
+            5e18, // max rate
+            1e18, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Constructor: initial reward rate above maximum should revert.
+    function testConstructor_RevertOnInitialRewardRateTooHigh() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooHigh.selector, 6e18, 5e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            6e18, // initial rate (too high)
+            address(this),
+            5e18, // max rate
+            0, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Constructor: min reward rate above max reward rate should revert.
+    function testConstructor_RevertOnMinRewardRateAboveMax() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 2e18, 1e18));
+        new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // initial rate
+            address(this),
+            1e18, // max rate
+            2e18, // min rate (above max)
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+    }
+
+    /// @notice Propose reward rate below minimum should revert.
+    function testProposeRewardRate_RevertBelowMin_NewValidation() public {
+        // Create a staking contract with min reward rate = 1e18
+        SinglePoolStaking s = new SinglePoolStaking(
+            stakeToken,
+            stakeToken,
+            1e18, // initial rate
+            address(this),
+            5e18, // max rate
+            1e18, // min rate
+            1, // rate change delay
+            1, // withdraw delay
+            0 // min stake amount
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooLow.selector, 0, 1e18));
+        s.proposeRewardRate(0); // below minimum
+    }
+
+    /// @notice Propose reward rate above maximum should revert (new validation test).
+    function testProposeRewardRate_RevertAboveMax_NewValidation() public {
+        vm.expectRevert(abi.encodeWithSelector(SinglePoolStaking.RewardRateTooHigh.selector, 6e18, 5e18));
+        staking.proposeRewardRate(6e18); // above maximum
+    }
+
+    /// @notice Propose reward rate within bounds should succeed.
+    function testProposeRewardRate_WithinBounds_Succeeds() public {
+        // Should succeed with rate between min (0) and max (5e18)
+        staking.proposeRewardRate(2e18);
+
+        // Verify the proposal was set
+        assertEq(staking.pendingRewardRate(), 2e18, "pending reward rate not set");
+        assertGt(staking.rateChangeExecuteAfter(), 0, "execute after timestamp not set");
     }
 }

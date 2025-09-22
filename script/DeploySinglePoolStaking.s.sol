@@ -15,6 +15,7 @@ contract DeploySinglePoolStaking is Script {
         address owner;
         uint256 rewardRate;
         uint256 maxRewardRate;
+        uint256 minRewardRate;
         uint64 rateChangeDelay;
         uint64 withdrawDelay;
         uint256 minStakeAmount;
@@ -46,6 +47,7 @@ contract DeploySinglePoolStaking is Script {
             cfg.rewardRate,
             cfg.owner,
             cfg.maxRewardRate,
+            cfg.minRewardRate,
             cfg.rateChangeDelay,
             cfg.withdrawDelay,
             cfg.minStakeAmount
@@ -65,6 +67,7 @@ contract DeploySinglePoolStaking is Script {
         cfg.owner = HelperUtils.getAddressFromJson(vm, configPath, ".owner");
         cfg.rewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.rewardRate");
         cfg.maxRewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.maxRewardRate");
+        cfg.minRewardRate = HelperUtils.getUintFromJson(vm, configPath, ".staking.minRewardRate");
         cfg.rateChangeDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.rateChangeDelay"));
         cfg.withdrawDelay = uint64(HelperUtils.getUintFromJson(vm, configPath, ".staking.withdrawDelay"));
         cfg.minStakeAmount = HelperUtils.getUintFromJson(vm, configPath, ".staking.minStakeAmount");

@@ -74,6 +74,7 @@ contract SinglePoolStaking_Fuzz is SinglePoolStakingBase {
                 1e18,
                 address(this),
                 1e18,
+                0, // MIN_REWARD_RATE
                 1, // RATE_CHANGE_DELAY
                 1, // withdrawDelay
                 0 // minStakeAmount

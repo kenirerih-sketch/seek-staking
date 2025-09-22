@@ -51,13 +51,14 @@ abstract contract SinglePoolStakingBase is Test {
         stakeToken = new ERC20Token("Stake Token", "STK", 1_000_000 ether, owner);
 
         // Deploy staking: same token for stake & reward, rate = 1 token/s
-        // params: (stakeToken, rewardToken, initialRate, owner, maxRate, rateChangeDelay, initialWithdrawDelay, minStakeAmount)
+        // params: (stakeToken, rewardToken, initialRate, owner, maxRate, minRate, rateChangeDelay, initialWithdrawDelay, minStakeAmount)
         staking = new SinglePoolStaking(
             stakeToken,
             stakeToken,
             1e18, // rewardRate = 1 token/s
             owner,
             5e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE (allow pausing)
             1, // RATE_CHANGE_DELAY (seconds)
             1, // withdrawDelay (seconds) — keeps tests snappy
             0 // minStakeAmount

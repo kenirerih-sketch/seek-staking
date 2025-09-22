@@ -283,6 +283,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
                 5e18, // 5 tokens/sec
                 address(this),
                 5e18, // MAX_REWARD_RATE
+                0, // MIN_REWARD_RATE
                 1, // RATE_CHANGE_DELAY
                 1, // withdrawDelay
                 0 // minStakeAmount
@@ -455,6 +456,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             1e18, // 1 token/sec
             address(this),
             5e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE
             1, // RATE_CHANGE_DELAY
             1, // withdrawDelay
             0 // minStakeAmount
@@ -533,6 +535,7 @@ contract SinglePoolStaking_Scenarios is SinglePoolStakingBase {
             1e18, // 1 token/sec
             address(this),
             5e18, // MAX_REWARD_RATE
+            0, // MIN_REWARD_RATE
             1, // RATE_CHANGE_DELAY
             1, // withdrawDelay (arbitrary for this test)
             0 // minStakeAmount
