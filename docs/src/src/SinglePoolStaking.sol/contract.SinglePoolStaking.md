@@ -1,5 +1,5 @@
 # SinglePoolStaking
-[Git Source](https://github.com/TalismanSociety/seek-staking/blob/60eef592486ac6cd6a94d5a30eefd200b257718f/src/SinglePoolStaking.sol)
+[Git Source](https://github.com/TalismanSociety/seek-staking/blob/a56cd77d158dd909d983cf96177d98e74e4138ff/src/SinglePoolStaking.sol)
 
 **Inherits:**
 Ownable2Step, ReentrancyGuard
@@ -585,6 +585,7 @@ Withdraw staked principal immediately, **forfeiting** any accrued rewards.
 
 *
 - Calls `_updateGlobal()` (not `_updateUser`) to keep global math consistent.
+- Calculates forfeited rewards and returns them to rewardReserves to prevent reserve grief.
 - Zeros user principal & rewards and snaps `userRewardPerTokenPaid` to the latest global index.*
 
 
