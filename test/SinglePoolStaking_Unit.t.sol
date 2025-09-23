@@ -1047,4 +1047,53 @@ contract SinglePoolStaking_Unit is SinglePoolStakingBase {
         // After fix: reservesBefore - reservesAfter = 0 (no drain)
         assertEq(reservesBefore, reservesAfter, "Reserves should not be drained due to rounding");
     }
+
+    /// @notice Test that demonstrates the reserve grief attack via emergency exit (auditor's PoC).
+    /// @dev This test shows the FIXED behavior: emergencyWithdraw() now returns forfeited rewards to reserves,
+    ///      preventing the grief attack where reserves would be consumed but rewards forfeited.
+    function testBlockOnEmergencyExit() public {
+        uint256 elapsed = 10;
+        staking.setEmergencyExitEnabled(true);
+        _stake(alice, 100 ether);
+        vm.warp(block.timestamp + elapsed);
+        uint256 resBefore = staking.rewardReserves();
+        vm.prank(alice);
+        staking.emergencyWithdraw();
+        uint256 resAfter = staking.rewardReserves();
+
+        // With the fix: reserves should NOT be consumed because forfeited rewards are returned
+        // Before fix: resBefore - resAfter = expectedConsume (reserves consumed but not claimable)
+        // After fix: resBefore - resAfter = 0 (reserves returned via forfeited rewards)
+        assertEq(resBefore, resAfter, "reserves should be returned via forfeited rewards (grief attack fixed)");
+        assertEq(staking.balanceOf(alice), 0, "alice stake not cleared");
+        assertEq(staking.earned(alice), 0, "alice rewards not forfeited");
+    }
+
+    /// @notice Test that verifies the fix for emergency exit reserve grief attack.
+    /// @dev After the fix, forfeited rewards should be returned to reserves, preventing the grief attack.
+    function testEmergencyExitReserveGrief_Fixed() public {
+        uint256 elapsed = 10;
+        staking.setEmergencyExitEnabled(true);
+        _stake(alice, 100 ether);
+        vm.warp(block.timestamp + elapsed);
+
+        uint256 resBefore = staking.rewardReserves();
+
+        // Calculate expected forfeited rewards
+        uint256 expectedForfeitedRewards = staking.earned(alice);
+
+        vm.prank(alice);
+        staking.emergencyWithdraw();
+
+        uint256 resAfter = staking.rewardReserves();
+
+        // With the fix: reserves should be consumed by _updateGlobal() but then returned by forfeited rewards
+        // Net effect: reserves should remain unchanged (or very close due to rounding)
+        assertEq(resBefore, resAfter, "reserves should be returned via forfeited rewards");
+        assertEq(staking.balanceOf(alice), 0, "alice stake not cleared");
+        assertEq(staking.earned(alice), 0, "alice rewards not forfeited");
+
+        // Verify that the forfeited rewards were actually calculated
+        assertGt(expectedForfeitedRewards, 0, "should have had rewards to forfeit");
+    }
 }

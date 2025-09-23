@@ -643,10 +643,10 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
     /// @notice Withdraw staked principal immediately, **forfeiting** any accrued rewards.
     /// @dev
     /// - Calls `_updateGlobal()` (not `_updateUser`) to keep global math consistent.
+    /// - Calculates forfeited rewards and returns them to rewardReserves to prevent reserve grief.
     /// - Zeros user principal & rewards and snaps `userRewardPerTokenPaid` to the latest global index.
     function emergencyWithdraw() external nonReentrant {
         if (!emergencyExitEnabled) revert EmergencyExitDisabled();
-        _updateGlobal(); // keep global math consistent
 
         User storage u = users[msg.sender];
         PendingWithdrawal storage p = pendingWithdrawals[msg.sender];
@@ -654,7 +654,21 @@ contract SinglePoolStaking is Ownable2Step, ReentrancyGuard {
         uint256 amount = u.balance + p.amount; // Include pending
         if (amount == 0) revert InsufficientBalance();
 
+        // Calculate forfeited rewards before updating global state
+        uint256 forfeitedRewards = 0;
+        if (u.balance > 0) {
+            uint256 rpt = rewardPerToken();
+            forfeitedRewards = u.rewards + (u.balance * (rpt - u.userRewardPerTokenPaid)) / 1e18;
+        }
+
+        _updateGlobal(); // keep global math consistent
+
         totalStaked -= u.balance; // Only deduct actual staked amount
+
+        // Return forfeited rewards to reserves to prevent grief attack
+        if (forfeitedRewards > 0) {
+            rewardReserves += forfeitedRewards;
+        }
 
         // Forfeit rewards and reset state
         u.balance = 0;
