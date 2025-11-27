@@ -1,12 +1,12 @@
 {
-  "owner": "0x5C9EBa3b10E45BF6db77267B40B95F3f91Fc5f67",
+  "owner": "0x0660b8dCfd82653C659068F931EbAC6230790a01",
   "staking": {
-    "stakeToken": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
-    "rewardToken": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
-    "rewardRate": 158445130000000000,
+    "stakeToken": "0x2a69b0383759572081C09f0A68D3a8a955751DdE",
+    "rewardToken": "0x2a69b0383759572081C09f0A68D3a8a955751DdE",
+    "rewardRate": 5556000000000000,
     "maxRewardRate": 1e18,
     "minRewardRate": 0,
-    "rateChangeDelay": 604800,
+    "rateChangeDelay": 21600,
     "withdrawDelay": 604800,
     "minStakeAmount": 1e18
   }
