@@ -7,7 +7,7 @@
     "maxRewardRate": 1e18,
     "minRewardRate": 0,
     "rateChangeDelay": 21600,
-    "withdrawDelay": 604800,
+    "withdrawDelay": 1209600,
     "minStakeAmount": 1e18
   }
 }
