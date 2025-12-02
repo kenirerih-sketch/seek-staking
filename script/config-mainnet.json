@@ -1,8 +1,8 @@
 {
-  "owner": "0x0660b8dCfd82653C659068F931EbAC6230790a01",
+  "owner": "0x936c6ef8DadcaC59EEDACC3A51ede70C80F32e2C",
   "staking": {
-    "stakeToken": "0x2a69b0383759572081C09f0A68D3a8a955751DdE",
-    "rewardToken": "0x2a69b0383759572081C09f0A68D3a8a955751DdE",
+    "stakeToken": "0x07c3e739c65f81ea79d19a88d27de4c9f15f8df0",
+    "rewardToken": "0x07c3e739c65f81ea79d19a88d27de4c9f15f8df0",
     "rewardRate": 5556000000000000,
     "maxRewardRate": 1e18,
     "minRewardRate": 0,
